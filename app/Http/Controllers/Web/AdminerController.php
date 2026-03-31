@@ -3,14 +3,14 @@
 namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
+use App\Services\AdminerService;
 use Illuminate\Http\Request;
 
 class AdminerController extends Controller
 {
-    public function __invoke(Request $request): void
+    public function __invoke(Request $request, AdminerService $adminer): void
     {
         $credentials = session('adminer_credentials');
-        $GLOBALS['_adminer_credentials'] = $credentials;
 
         // Auto-login: simulate form submission only on the initial load
         // (before Adminer redirects with its own query parameters)
@@ -27,6 +27,6 @@ class AdminerController extends Controller
             ];
         }
 
-        require resource_path('adminer/index.php');
+        $adminer->render($credentials);
     }
 }

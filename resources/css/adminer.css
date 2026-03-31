@@ -11,10 +11,13 @@
 #foot > form:last-child { display: none !important; }
 #lang { display: none !important; }
 
-/* ── Hide first breadcrumb links (server) ───────── */
-#breadcrumb { font-size: 0 !important; }
-#breadcrumb * { font-size: 13px !important; }
 #breadcrumb a:first-of-type { display: none !important; }
+
+#breadcrumb {
+    position: fixed;
+    z-index: 2;
+    padding-left: 20px;
+}
 
 /* ── Modern font ────────────────────────────────── */
 body {
