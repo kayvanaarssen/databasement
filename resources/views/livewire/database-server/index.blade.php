@@ -184,15 +184,17 @@
 
             @scope('actions', $server)
                 <div class="flex gap-2 justify-end">
-                    @if($server->database_type !== \App\Enums\DatabaseType::REDIS)
-                        <x-button
-                            icon="o-table-cells"
-                            wire:click="openAdminer('{{ $server->id }}')"
-                            spinner
-                            tooltip="{{ __('Browse') }}"
-                            class="btn-ghost btn-sm text-accent"
-                        />
-                    @endif
+                    @can('view', $server)
+                        @if($server->database_type !== \App\Enums\DatabaseType::REDIS)
+                            <x-button
+                                icon="o-table-cells"
+                                wire:click="openAdminer('{{ $server->id }}')"
+                                spinner
+                                tooltip="{{ __('Browse') }}"
+                                class="btn-ghost btn-sm text-accent"
+                            />
+                        @endif
+                    @endcan
                     @can('backup', $server)
                         @if($server->backup)
                             <x-button

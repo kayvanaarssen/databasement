@@ -156,11 +156,19 @@ class Index extends Component
             $db = $server->database_names[0];
         }
 
+        try {
+            $password = $server->getDecryptedPassword();
+        } catch (\Throwable $e) {
+            $this->error($e->getMessage(), position: 'toast-bottom');
+
+            return;
+        }
+
         session()->put('adminer_credentials', [
             'driver' => $driver,
             'server' => $serverAddress,
             'username' => $server->username ?? '',
-            'password' => $server->getDecryptedPassword(),
+            'password' => $password,
             'db' => $db,
         ]);
 
