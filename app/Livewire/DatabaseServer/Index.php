@@ -128,6 +128,48 @@ class Index extends Component
         $this->dispatch('open-restore-modal', targetServerId: $id);
     }
 
+    public function openAdminer(string $id): void
+    {
+        $server = DatabaseServer::findOrFail($id);
+
+        $this->authorize('view', $server);
+
+        if ($server->database_type === DatabaseType::REDIS) {
+            $this->error(__('Adminer does not support Redis.'), position: 'toast-bottom');
+
+            return;
+        }
+
+        $driver = match ($server->database_type) {
+            DatabaseType::MYSQL => 'server',
+            DatabaseType::POSTGRESQL => 'pgsql',
+            DatabaseType::SQLITE => 'sqlite',
+            DatabaseType::MONGODB => 'mongo',
+        };
+
+        $serverAddress = $server->database_type === DatabaseType::SQLITE
+            ? ''
+            : $server->host.':'.$server->port;
+
+        $db = '';
+        if ($server->database_names && count($server->database_names) === 1) {
+            $db = $server->database_names[0];
+        }
+
+        session()->put('adminer_credentials', [
+            'driver' => $driver,
+            'server' => $serverAddress,
+            'username' => $server->username ?? '',
+            'password' => $server->getDecryptedPassword(),
+            'db' => $db,
+        ]);
+
+        $this->dispatch('open-adminer-modal',
+            serverName: $server->name,
+            adminerUrl: route('adminer'),
+        );
+    }
+
     public function runBackup(string $id, TriggerBackupAction $action): void
     {
         $server = DatabaseServer::with(['backup.volume'])->findOrFail($id);
