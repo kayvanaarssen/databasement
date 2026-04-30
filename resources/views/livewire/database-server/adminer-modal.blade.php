@@ -6,7 +6,7 @@
                     <div class="flex items-center gap-2">
                         <x-icon :name="$databaseIcon" class="w-5 h-5" />
                         <span class="text-sm text-base-content/70">{{ $databaseType }}</span>
-                        <h3 class="text-sm  font-bold">{{ $serverName }}</h3>
+                        <h3 class="text-sm font-bold">{{ $serverName }}</h3>
                     </div>
                     <button class="btn btn-sm btn-ghost btn-circle" @click="$wire.closeModal()">
                         <x-icon name="o-x-mark" class="w-5 h-5" />

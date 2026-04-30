@@ -13,17 +13,11 @@ function adminer_object()
 
     return new class($credentials, $cssPath) extends \Adminer\Adminer
     {
-        /** @var array<string, string>|null */
-        private ?array $creds;
-
-        private string $cssPath;
-
         /** @param array<string, string>|null $creds */
-        public function __construct(?array $creds, string $cssPath)
-        {
-            $this->creds = $creds;
-            $this->cssPath = $cssPath;
-        }
+        public function __construct(
+            private ?array $creds,
+            private string $cssPath,
+        ) {}
 
         /** @return array{string, string, string} */
         public function credentials(): array
