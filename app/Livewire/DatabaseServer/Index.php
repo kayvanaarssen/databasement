@@ -3,6 +3,7 @@
 namespace App\Livewire\DatabaseServer;
 
 use App\Enums\DatabaseType;
+use App\Facades\AppConfig;
 use App\Models\Backup;
 use App\Models\DatabaseServer;
 use App\Models\NotificationChannel;
@@ -133,6 +134,10 @@ class Index extends Component
 
     public function openAdminer(string $id): void
     {
+        if (! AppConfig::get('app.adminer_enabled')) {
+            return;
+        }
+
         $server = DatabaseServer::findOrFail($id);
 
         $this->authorize('view', $server);

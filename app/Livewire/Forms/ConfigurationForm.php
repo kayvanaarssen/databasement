@@ -8,6 +8,9 @@ use Livewire\Form;
 
 class ConfigurationForm extends Form
 {
+    // Application settings
+    public bool $adminer_enabled = true;
+
     // Backup settings
     public string $working_directory = '';
 
@@ -34,6 +37,7 @@ class ConfigurationForm extends Form
 
     public function loadFromConfig(): void
     {
+        $this->adminer_enabled = (bool) AppConfig::get('app.adminer_enabled');
         $this->working_directory = (string) AppConfig::get('backup.working_directory');
         $this->compression = (string) AppConfig::get('backup.compression');
         $this->compression_level = (int) AppConfig::get('backup.compression_level');
@@ -43,6 +47,29 @@ class ConfigurationForm extends Form
         $this->cleanup_cron = (string) AppConfig::get('backup.cleanup_cron');
         $this->verify_files = (bool) AppConfig::get('backup.verify_files');
         $this->verify_files_cron = (string) AppConfig::get('backup.verify_files_cron');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function applicationRules(): array
+    {
+        return [
+            'adminer_enabled' => ['boolean'],
+        ];
+    }
+
+    public function saveApplication(): void
+    {
+        $this->validate($this->applicationRules());
+
+        $appKeyMap = [
+            'adminer_enabled' => 'app.adminer_enabled',
+        ];
+
+        foreach ($appKeyMap as $property => $configKey) {
+            AppConfig::set($configKey, $this->{$property});
+        }
     }
 
     /**

@@ -121,12 +121,14 @@
 
             @scope('cell_actions', $server)
             <div>
-                @can('view', $server)
-                    @if(! in_array($server->database_type, [\App\Enums\DatabaseType::REDIS, \App\Enums\DatabaseType::MONGODB]))
-                        <x-button icon="o-table-cells" wire:click="openAdminer('{{ $server->id }}')" spinner
-                                  tooltip="{{ __('Browse') }}" class="btn-ghost btn-sm text-accent" />
-                    @endif
-                @endcan
+                @if(\App\Facades\AppConfig::get('app.adminer_enabled'))
+                    @can('view', $server)
+                        @if(! in_array($server->database_type, [\App\Enums\DatabaseType::REDIS, \App\Enums\DatabaseType::MONGODB]))
+                            <x-button icon="o-table-cells" wire:click="openAdminer('{{ $server->id }}')" spinner
+                                      tooltip="{{ __('Browse') }}" class="btn-ghost btn-sm text-accent" />
+                        @endif
+                    @endcan
+                @endif
                 @can('backup', $server)
                     <x-button icon="o-arrow-down-tray" wire:click="runBackupAll('{{ $server->id }}')" spinner
                               tooltip="{{ __('Backup now') }}" class="btn-ghost btn-sm text-info" />
@@ -158,7 +160,9 @@
     <livewire:database-server.restore-modal />
 
     <!-- ADMINER MODAL -->
-    <livewire:database-server.adminer-modal />
+    @if(\App\Facades\AppConfig::get('app.adminer_enabled'))
+        <livewire:database-server.adminer-modal />
+    @endif
 
     <!-- REDIS RESTORE INFO MODAL -->
     <x-modal wire:model="showRedisRestoreModal" :title="__('Restore Redis / Valkey Snapshot')" class="backdrop-blur">

@@ -140,6 +140,15 @@ class Index extends Component
         ];
     }
 
+    public function saveApplicationConfig(): void
+    {
+        abort_unless(auth()->user()->isAdmin(), Response::HTTP_FORBIDDEN);
+
+        $this->form->saveApplication();
+
+        $this->success(__('Application configuration saved.'));
+    }
+
     public function saveBackupConfig(): void
     {
         abort_unless(auth()->user()->isAdmin(), Response::HTTP_FORBIDDEN);

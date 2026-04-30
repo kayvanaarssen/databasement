@@ -1,5 +1,6 @@
 <?php
 
+use App\Facades\AppConfig;
 use App\Jobs\ProcessBackupJob;
 use App\Livewire\DatabaseServer\Index;
 use App\Models\Backup;
@@ -50,6 +51,18 @@ test('runBackup fails with authorization error if user is viewer', function () {
 });
 
 // --- openAdminer ---
+
+test('openAdminer does nothing when adminer is disabled', function () {
+    AppConfig::set('app.adminer_enabled', false);
+
+    $user = User::factory()->create(['role' => User::ROLE_ADMIN]);
+    $server = DatabaseServer::factory()->withoutBackups()->create(['database_type' => 'mysql']);
+
+    Livewire::actingAs($user)
+        ->test(Index::class)
+        ->call('openAdminer', $server->id)
+        ->assertNotDispatched('open-adminer-modal');
+});
 
 test('openAdminer rejects unsupported database types', function (string $factoryState) {
     $user = User::factory()->create(['role' => User::ROLE_ADMIN]);

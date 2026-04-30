@@ -28,7 +28,7 @@
 
     <div class="grid gap-6">
         <!-- Application Configuration (read-only) -->
-        <x-card title="{{ __('Application') }}" subtitle="{{ __('General application settings (read-only).') }}" shadow class="min-w-0">
+        <x-card :title="__('Application')" :subtitle="__('General application settings.')" shadow class="min-w-0">
             <x-slot:menu>
                 <x-button
                     label="{{ __('Documentation') }}"
@@ -39,6 +39,25 @@
                 />
             </x-slot:menu>
             @include('livewire.configuration._config-table', ['rows' => $appConfig])
+
+            <form wire:submit="saveApplicationConfig" class="mt-4 border-t border-base-200/60 pt-4">
+                <div class="divide-y divide-base-200/80">
+                    <x-config-row :label="__('Database Browser')" :description="__('Enable the built-in Adminer database browser for viewing and managing database contents.')">
+                        <x-toggle wire:model="form.adminer_enabled" :disabled="!$this->isAdmin" />
+                    </x-config-row>
+                </div>
+
+                @if ($this->isAdmin)
+                <div class="flex items-center justify-end border-t border-base-200/60 pt-6">
+                    <x-button
+                        type="submit"
+                        class="btn-primary"
+                        :label="__('Save Application Settings')"
+                        spinner="saveApplicationConfig"
+                    />
+                </div>
+                @endif
+            </form>
         </x-card>
 
         <!-- Backup Schedules -->
