@@ -177,6 +177,8 @@ class Index extends Component
 
         $this->dispatch('open-adminer-modal',
             serverName: $server->name,
+            databaseIcon: $server->database_type->icon(),
+            databaseType: $server->database_type->label(),
             adminerUrl: route('adminer'),
         );
     }
