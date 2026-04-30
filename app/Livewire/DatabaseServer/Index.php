@@ -137,8 +137,8 @@ class Index extends Component
 
         $this->authorize('view', $server);
 
-        if ($server->database_type === DatabaseType::REDIS) {
-            $this->error(__('Adminer does not support Redis.'), position: 'toast-bottom');
+        if (in_array($server->database_type, [DatabaseType::REDIS, DatabaseType::MONGODB])) {
+            $this->error(__('Adminer does not support this database type.'), position: 'toast-bottom');
 
             return;
         }
@@ -147,7 +147,6 @@ class Index extends Component
             DatabaseType::MYSQL => 'server',
             DatabaseType::POSTGRESQL => 'pgsql',
             DatabaseType::SQLITE => 'sqlite',
-            DatabaseType::MONGODB => 'mongo',
         };
 
         $serverAddress = $server->database_type === DatabaseType::SQLITE

@@ -20,6 +20,7 @@ class AdminerService
             return;
         }
 
+        $this->useNonLockingSessionHandler();
         $this->startOutputBuffering();
         $this->defineAdminerObject();
 
@@ -74,6 +75,68 @@ class AdminerService
 
         @readfile($vendorAdminer.'/'.$_GET['file']);
         exit;
+    }
+
+    /**
+     * Register a non-locking session handler so Adminer's session_start()
+     * doesn't block concurrent requests (navigations, sub-resources).
+     * The default file handler uses flock(), causing timeouts when
+     * multiple Adminer requests overlap for the same session.
+     */
+    private function useNonLockingSessionHandler(): void
+    {
+        $savePath = ini_get('session.save_path') ?: sys_get_temp_dir();
+
+        session_set_save_handler(new class($savePath) implements \SessionHandlerInterface
+        {
+            public function __construct(private string $savePath) {}
+
+            public function open(string $path, string $name): bool
+            {
+                return true;
+            }
+
+            public function close(): bool
+            {
+                return true;
+            }
+
+            public function read(string $id): string
+            {
+                $file = $this->savePath.'/sess_'.$id;
+
+                return (string) @file_get_contents($file);
+            }
+
+            public function write(string $id, string $data): bool
+            {
+                $file = $this->savePath.'/sess_'.$id;
+
+                return file_put_contents($file, $data) !== false;
+            }
+
+            public function destroy(string $id): bool
+            {
+                $file = $this->savePath.'/sess_'.$id;
+                if (file_exists($file)) {
+                    @unlink($file);
+                }
+
+                return true;
+            }
+
+            public function gc(int $max_lifetime): int
+            {
+                $files = glob($this->savePath.'/sess_*') ?: [];
+                foreach ($files as $file) {
+                    if (filemtime($file) + $max_lifetime < time()) {
+                        @unlink($file);
+                    }
+                }
+
+                return 0;
+            }
+        });
     }
 
     /**

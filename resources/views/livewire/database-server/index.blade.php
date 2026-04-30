@@ -122,7 +122,7 @@
             @scope('cell_actions', $server)
             <div>
                 @can('view', $server)
-                    @if($server->database_type !== \App\Enums\DatabaseType::REDIS)
+                    @if(! in_array($server->database_type, [\App\Enums\DatabaseType::REDIS, \App\Enums\DatabaseType::MONGODB]))
                         <x-button icon="o-table-cells" wire:click="openAdminer('{{ $server->id }}')" spinner
                                   tooltip="{{ __('Browse') }}" class="btn-ghost btn-sm text-accent" />
                     @endif

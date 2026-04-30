@@ -27,6 +27,11 @@ class AdminerController extends Controller
             ];
         }
 
+        // Release the session lock before Adminer runs. Adminer is long-lived
+        // and loads sub-resources (CSS/JS) through this same route — holding
+        // the lock would block those requests and cause timeouts.
+        session()->save();
+
         $adminer->render($credentials);
     }
 }
