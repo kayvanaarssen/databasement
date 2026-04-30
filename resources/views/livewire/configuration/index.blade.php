@@ -43,8 +43,14 @@
             <form wire:submit="saveApplicationConfig" class="mt-4 border-t border-base-200/60 pt-4">
                 <div class="divide-y divide-base-200/80">
                     <x-config-row :label="__('Database Browser')" :description="__('Enable the built-in Adminer database browser for viewing and managing database contents.')">
-                        <x-toggle wire:model="form.adminer_enabled" :disabled="!$this->isAdmin" />
+                        <x-toggle wire:model.live="form.adminer_enabled" :disabled="!$this->isAdmin" />
                     </x-config-row>
+
+                    @if ($form->adminer_enabled)
+                        <x-config-row :label="__('Database Browser Role')" :description="__('Minimum role required to access the database browser.')">
+                            <x-select wire:model="form.adminer_role" :options="$adminerRoleOptions" :disabled="!$this->isAdmin" />
+                        </x-config-row>
+                    @endif
                 </div>
 
                 @if ($this->isAdmin)

@@ -29,7 +29,8 @@ test('configuration page displays current values', function () {
         ->test(Index::class)
         ->assertSee('Configuration')
         ->assertSee('Save Backup Settings')
-        ->assertSet('form.adminer_enabled', true)
+        ->assertSet('form.adminer_enabled', false)
+        ->assertSet('form.adminer_role', 'admin')
         ->assertSet('form.compression', 'gzip')
         ->assertSet('form.compression_level', 6)
         ->assertSet('form.verify_files', true);
@@ -58,14 +59,16 @@ test('non-admin users cannot send test notification', function () {
         ->assertForbidden();
 });
 
-test('saving application config persists adminer enabled', function () {
+test('saving application config persists adminer settings', function () {
     Livewire::actingAs(User::factory()->create(['role' => 'admin']))
         ->test(Index::class)
-        ->set('form.adminer_enabled', false)
+        ->set('form.adminer_enabled', true)
+        ->set('form.adminer_role', 'member')
         ->call('saveApplicationConfig')
         ->assertHasNoErrors();
 
-    expect(AppConfig::get('app.adminer_enabled'))->toBe(false);
+    expect(AppConfig::get('app.adminer_enabled'))->toBe(true)
+        ->and(AppConfig::get('app.adminer_role'))->toBe('member');
 });
 
 test('non-admin cannot save application config', function () {

@@ -6,7 +6,6 @@ use App\Livewire\DatabaseServer\Index;
 use App\Models\Backup;
 use App\Models\DatabaseServer;
 use App\Models\User;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Livewire\Livewire;
 
@@ -52,89 +51,65 @@ test('runBackup fails with authorization error if user is viewer', function () {
 
 // --- openAdminer ---
 
-test('openAdminer does nothing when adminer is disabled', function () {
-    AppConfig::set('app.adminer_enabled', false);
-
+test('openAdminer is forbidden when adminer is disabled', function () {
     $user = User::factory()->create(['role' => User::ROLE_ADMIN]);
     $server = DatabaseServer::factory()->withoutBackups()->create(['database_type' => 'mysql']);
 
     Livewire::actingAs($user)
         ->test(Index::class)
         ->call('openAdminer', $server->id)
-        ->assertNotDispatched('open-adminer-modal');
+        ->assertForbidden();
 });
 
-test('openAdminer rejects unsupported database types', function (string $factoryState) {
+test('openAdminer is forbidden for users below required role', function () {
+    AppConfig::set('app.adminer_enabled', true);
+    AppConfig::set('app.adminer_role', 'admin');
+
+    $user = User::factory()->create(['role' => User::ROLE_MEMBER]);
+    $server = DatabaseServer::factory()->withoutBackups()->create(['database_type' => 'mysql']);
+
+    Livewire::actingAs($user)
+        ->test(Index::class)
+        ->call('openAdminer', $server->id)
+        ->assertForbidden();
+});
+
+test('openAdminer dispatches modal for users meeting required role', function () {
+    AppConfig::set('app.adminer_enabled', true);
+    AppConfig::set('app.adminer_role', 'member');
+
+    $user = User::factory()->create(['role' => User::ROLE_MEMBER]);
+    $server = DatabaseServer::factory()->withoutBackups()->create(['database_type' => 'mysql']);
+
+    Livewire::actingAs($user)
+        ->test(Index::class)
+        ->call('openAdminer', $server->id)
+        ->assertDispatched('open-adminer-modal');
+});
+
+test('openAdminer is forbidden for unsupported database types', function (string $factoryState) {
+    AppConfig::set('app.adminer_enabled', true);
+
     $user = User::factory()->create(['role' => User::ROLE_ADMIN]);
     $server = DatabaseServer::factory()->{$factoryState}()->withoutBackups()->create();
 
     Livewire::actingAs($user)
         ->test(Index::class)
         ->call('openAdminer', $server->id)
-        ->assertNotDispatched('open-adminer-modal');
+        ->assertForbidden();
 })->with([
     'redis' => ['redis'],
     'mongodb' => ['mongodb'],
 ]);
 
-test('openAdminer maps correct driver and credentials for MySQL', function () {
+test('openAdminer is forbidden for servers using SSH', function () {
+    AppConfig::set('app.adminer_enabled', true);
+
     $user = User::factory()->create(['role' => User::ROLE_ADMIN]);
-    $server = DatabaseServer::factory()->withoutBackups()->create([
-        'database_type' => 'mysql',
-        'host' => 'db.example.com',
-        'port' => 3306,
-        'username' => 'admin',
-        'password' => 'secret',
-    ]);
+    $server = DatabaseServer::factory()->withSshTunnel()->withoutBackups()->create(['database_type' => 'mysql']);
 
     Livewire::actingAs($user)
         ->test(Index::class)
         ->call('openAdminer', $server->id)
-        ->assertDispatched('open-adminer-modal');
-
-    expect(session('adminer_credentials'))->toMatchArray([
-        'driver' => 'server',
-        'server' => 'db.example.com:3306',
-        'username' => 'admin',
-        'password' => 'secret',
-        'db' => '',
-    ]);
-});
-
-test('openAdminer maps pgsql driver for PostgreSQL', function () {
-    $user = User::factory()->create(['role' => User::ROLE_ADMIN]);
-    $server = DatabaseServer::factory()->withoutBackups()->create(['database_type' => 'postgres']);
-
-    Livewire::actingAs($user)
-        ->test(Index::class)
-        ->call('openAdminer', $server->id)
-        ->assertDispatched('open-adminer-modal');
-
-    expect(session('adminer_credentials')['driver'])->toBe('pgsql');
-});
-
-test('openAdminer auto-selects database when backup has exactly one', function () {
-    $user = User::factory()->create(['role' => User::ROLE_ADMIN]);
-    $server = DatabaseServer::factory()->withoutBackups()->create(['database_type' => 'mysql']);
-    Backup::factory()->for($server)->selected(['mydb'])->create();
-
-    Livewire::actingAs($user)
-        ->test(Index::class)
-        ->call('openAdminer', $server->id)
-        ->assertDispatched('open-adminer-modal');
-
-    expect(session('adminer_credentials')['db'])->toBe('mydb');
-});
-
-test('openAdminer shows error when password decryption fails', function () {
-    $user = User::factory()->create(['role' => User::ROLE_ADMIN]);
-    $server = DatabaseServer::factory()->withoutBackups()->create(['database_type' => 'mysql']);
-
-    // Corrupt the encrypted password to trigger DecryptException
-    DB::table('database_servers')->where('id', $server->id)->update(['password' => 'corrupted']);
-
-    Livewire::actingAs($user)
-        ->test(Index::class)
-        ->call('openAdminer', $server->id)
-        ->assertNotDispatched('open-adminer-modal');
+        ->assertForbidden();
 });

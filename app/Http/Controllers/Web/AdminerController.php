@@ -2,31 +2,34 @@
 
 namespace App\Http\Controllers\Web;
 
-use App\Facades\AppConfig;
+use App\Enums\DatabaseType;
 use App\Http\Controllers\Controller;
+use App\Models\DatabaseServer;
 use App\Services\AdminerService;
-use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 
 class AdminerController extends Controller
 {
-    public function __invoke(Request $request, AdminerService $adminer): void
+    public function __invoke(AdminerService $adminer): void
     {
-        abort_unless((bool) AppConfig::get('app.adminer_enabled'), 404);
+        Gate::authorize('adminer', DatabaseServer::class);
 
-        $credentials = session('adminer_credentials');
+        $credentials = null;
+        $serverId = session()->pull('adminer_server_id');
 
-        // Auto-login: simulate form submission only on the initial load
-        // (before Adminer redirects with its own query parameters)
-        $isInitialLoad = ! isset($_GET['server']) && ! isset($_GET['pgsql'])
-            && ! isset($_GET['sqlite']) && ! isset($_GET['mongo']);
+        // Initial load: build credentials from the database server stored in session
+        if ($serverId) {
+            /** @var DatabaseServer $server */
+            $server = DatabaseServer::findOrFail($serverId);
+            abort_unless($server->supportsAdminer(), 403);
 
-        if ($credentials && $isInitialLoad && ! isset($_POST['auth'])) {
+            $credentials = $this->buildCredentials($server);
             $_POST['auth'] = [
                 'driver' => $credentials['driver'],
                 'server' => $credentials['server'],
                 'username' => $credentials['username'],
                 'password' => $credentials['password'],
-                'db' => $credentials['db'] ?? '',
+                'db' => $credentials['db'],
             ];
         }
 
@@ -36,5 +39,35 @@ class AdminerController extends Controller
         session()->save();
 
         $adminer->render($credentials);
+    }
+
+    /**
+     * @return array{driver: string, server: string, username: string, password: string, db: string}
+     */
+    private function buildCredentials(DatabaseServer $server): array
+    {
+        $driver = match ($server->database_type) { // @phpstan-ignore match.unhandled (supportsAdminer() filters unsupported types)
+            DatabaseType::MYSQL => 'server',
+            DatabaseType::POSTGRESQL => 'pgsql',
+            DatabaseType::SQLITE => 'sqlite',
+        };
+
+        $serverAddress = $server->database_type === DatabaseType::SQLITE
+            ? ''
+            : $server->host.':'.$server->port;
+
+        $db = '';
+        $databaseNames = $server->backups->first()?->database_names;
+        if ($databaseNames && count($databaseNames) === 1) {
+            $db = $databaseNames[0];
+        }
+
+        return [
+            'driver' => $driver,
+            'server' => $serverAddress,
+            'username' => $server->username ?? '',
+            'password' => $server->getDecryptedPassword(),
+            'db' => $db,
+        ];
     }
 }

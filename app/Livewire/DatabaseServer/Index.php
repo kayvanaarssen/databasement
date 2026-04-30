@@ -3,7 +3,6 @@
 namespace App\Livewire\DatabaseServer;
 
 use App\Enums\DatabaseType;
-use App\Facades\AppConfig;
 use App\Models\Backup;
 use App\Models\DatabaseServer;
 use App\Models\NotificationChannel;
@@ -12,6 +11,7 @@ use App\Services\Backup\TriggerBackupAction;
 use App\Traits\Toast;
 use Illuminate\Contracts\View\View;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\View as ViewFacade;
 use Livewire\Attributes\Locked;
 use Livewire\Attributes\Title;
@@ -134,51 +134,12 @@ class Index extends Component
 
     public function openAdminer(string $id): void
     {
-        if (! AppConfig::get('app.adminer_enabled')) {
-            return;
-        }
-
         $server = DatabaseServer::findOrFail($id);
 
-        $this->authorize('view', $server);
+        abort_unless($server->supportsAdminer(), 403);
+        $this->authorize('adminer', DatabaseServer::class);
 
-        if (in_array($server->database_type, [DatabaseType::REDIS, DatabaseType::MONGODB])) {
-            $this->error(__('Adminer does not support this database type.'), position: 'toast-bottom');
-
-            return;
-        }
-
-        $driver = match ($server->database_type) {
-            DatabaseType::MYSQL => 'server',
-            DatabaseType::POSTGRESQL => 'pgsql',
-            DatabaseType::SQLITE => 'sqlite',
-        };
-
-        $serverAddress = $server->database_type === DatabaseType::SQLITE
-            ? ''
-            : $server->host.':'.$server->port;
-
-        $db = '';
-        $databaseNames = $server->backups->first()?->database_names;
-        if ($databaseNames && count($databaseNames) === 1) {
-            $db = $databaseNames[0];
-        }
-
-        try {
-            $password = $server->getDecryptedPassword();
-        } catch (\Throwable $e) {
-            $this->error($e->getMessage(), position: 'toast-bottom');
-
-            return;
-        }
-
-        session()->put('adminer_credentials', [
-            'driver' => $driver,
-            'server' => $serverAddress,
-            'username' => $server->username ?? '',
-            'password' => $password,
-            'db' => $db,
-        ]);
+        session()->put('adminer_server_id', $server->id);
 
         $this->dispatch('open-adminer-modal',
             serverName: $server->name,
@@ -272,6 +233,7 @@ class Index extends Component
         return view('livewire.database-server.index', [
             'servers' => $servers,
             'headers' => $this->headers(),
+            'canAdminer' => Gate::allows('adminer', DatabaseServer::class),
         ]);
     }
 }

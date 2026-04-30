@@ -26,12 +26,12 @@ function adminer_object()
                 return [$this->creds['server'], $this->creds['username'], $this->creds['password']];
             }
 
-            return ['', '', ''];
+            return parent::credentials();
         }
 
         public function login($login, $password)
         {
-            return $this->creds !== null;
+            return true;
         }
 
         public function headers()

@@ -9,6 +9,7 @@ use App\Livewire\Forms\ConfigurationForm;
 use App\Livewire\Forms\NotificationChannelForm;
 use App\Models\BackupSchedule;
 use App\Models\NotificationChannel;
+use App\Models\User;
 use App\Services\Backup\TriggerBackupAction;
 use App\Services\NotificationService;
 use App\Traits\Toast;
@@ -415,6 +416,18 @@ class Index extends Component
     /**
      * @return array<int, array{id: string, name: string}>
      */
+    public function getAdminerRoleOptions(): array
+    {
+        return [
+            ['id' => User::ROLE_ADMIN, 'name' => __('Admin')],
+            ['id' => User::ROLE_MEMBER, 'name' => __('Member')],
+            ['id' => User::ROLE_VIEWER, 'name' => __('Viewer')],
+        ];
+    }
+
+    /**
+     * @return array<int, array{id: string, name: string}>
+     */
     public function getChannelTypeOptions(): array
     {
         return array_map(
@@ -451,6 +464,7 @@ class Index extends Component
             'headers' => $this->getHeaders(),
             'appConfig' => $this->getAppConfig(),
             'ssoConfig' => $this->getSsoConfig(),
+            'adminerRoleOptions' => $this->getAdminerRoleOptions(),
             'compressionOptions' => $this->getCompressionOptions(),
             'channelTypeOptions' => $this->getChannelTypeOptions(),
             'backupSchedules' => $this->backupSchedules(),

@@ -194,6 +194,14 @@ class User extends Authenticatable
         return ! $this->isViewer() && ! $this->isDemo();
     }
 
+    public function meetsMinimumRole(string $minimumRole): bool
+    {
+        $userIndex = array_search($this->role, self::ROLES);
+        $requiredIndex = array_search($minimumRole, self::ROLES);
+
+        return $userIndex !== false && $requiredIndex !== false && $userIndex >= $requiredIndex;
+    }
+
     public function isPending(): bool
     {
         return $this->invitation_token !== null && $this->password === null;

@@ -3,13 +3,17 @@
 namespace App\Livewire\Forms;
 
 use App\Facades\AppConfig;
+use App\Models\User;
 use Cron\CronExpression;
+use Illuminate\Validation\Rule;
 use Livewire\Form;
 
 class ConfigurationForm extends Form
 {
     // Application settings
-    public bool $adminer_enabled = true;
+    public bool $adminer_enabled = false;
+
+    public string $adminer_role = 'admin';
 
     // Backup settings
     public string $working_directory = '';
@@ -38,6 +42,7 @@ class ConfigurationForm extends Form
     public function loadFromConfig(): void
     {
         $this->adminer_enabled = (bool) AppConfig::get('app.adminer_enabled');
+        $this->adminer_role = (string) AppConfig::get('app.adminer_role');
         $this->working_directory = (string) AppConfig::get('backup.working_directory');
         $this->compression = (string) AppConfig::get('backup.compression');
         $this->compression_level = (int) AppConfig::get('backup.compression_level');
@@ -56,6 +61,7 @@ class ConfigurationForm extends Form
     {
         return [
             'adminer_enabled' => ['boolean'],
+            'adminer_role' => ['required', 'string', Rule::in([User::ROLE_ADMIN, User::ROLE_MEMBER, User::ROLE_VIEWER])],
         ];
     }
 
@@ -65,6 +71,7 @@ class ConfigurationForm extends Form
 
         $appKeyMap = [
             'adminer_enabled' => 'app.adminer_enabled',
+            'adminer_role' => 'app.adminer_role',
         ];
 
         foreach ($appKeyMap as $property => $configKey) {

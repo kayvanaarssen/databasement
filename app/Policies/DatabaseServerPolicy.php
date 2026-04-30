@@ -2,6 +2,7 @@
 
 namespace App\Policies;
 
+use App\Facades\AppConfig;
 use App\Models\DatabaseServer;
 use App\Models\User;
 
@@ -59,6 +60,20 @@ class DatabaseServerPolicy
     public function delete(User $user, DatabaseServer $databaseServer): bool
     {
         return $user->canPerformActions();
+    }
+
+    /**
+     * Determine whether the user can open the Adminer database browser.
+     * Requires the feature to be enabled and the user to meet the configured minimum role.
+     * Server compatibility (database type, SSH) is checked separately via DatabaseServer::supportsAdminer().
+     */
+    public function adminer(User $user): bool
+    {
+        if (! AppConfig::get('app.adminer_enabled')) {
+            return false;
+        }
+
+        return $user->meetsMinimumRole((string) AppConfig::get('app.adminer_role'));
     }
 
     /**
