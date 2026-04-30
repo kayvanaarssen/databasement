@@ -5,10 +5,11 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\Agent;
 use App\Models\AgentJob;
+use App\Models\Backup;
 use App\Models\DatabaseServer;
 use App\Services\Agent\AgentJobPayloadBuilder;
 use App\Services\Backup\BackupJobFactory;
-use App\Services\FailureNotificationService;
+use App\Services\NotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -233,7 +234,7 @@ class AgentController extends Controller
             $exception = new RuntimeException($validated['error_message']);
             $backupJob->markFailed($exception);
 
-            app(FailureNotificationService::class)->notifyBackupFailed($snapshot, $exception);
+            app(NotificationService::class)->notifyBackupFailed($snapshot, $exception);
         }
 
         return response()->json(['status' => 'ok']);
@@ -276,12 +277,27 @@ class AgentController extends Controller
         $payload = $agentJob->payload;
         $method = $payload['method'] ?? 'manual';
         $triggeredByUserId = $payload['triggered_by_user_id'] ?? null;
+        $backupId = $payload['backup_id'] ?? null;
+
+        /** @var Backup|null $backup */
+        $backup = $backupId !== null
+            ? Backup::with(['databaseServer', 'volume'])
+                ->where('id', $backupId)
+                ->where('database_server_id', $server->id)
+                ->first()
+            : null;
+
+        if ($backup === null) {
+            return response()->json([
+                'message' => 'Backup configuration not found for this discovery job.',
+            ], 422);
+        }
 
         $jobsCreated = 0;
 
         foreach ($validated['databases'] as $databaseName) {
             $snapshot = $backupJobFactory->createSnapshot(
-                $server,
+                $backup,
                 $databaseName,
                 $method,
                 $triggeredByUserId

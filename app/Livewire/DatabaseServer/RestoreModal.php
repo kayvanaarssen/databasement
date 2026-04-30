@@ -9,6 +9,7 @@ use App\Models\Snapshot;
 use App\Queries\SnapshotQuery;
 use App\Services\Backup\BackupJobFactory;
 use App\Services\Backup\Databases\DatabaseProvider;
+use App\Traits\Toast;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Contracts\View\View;
 use Illuminate\Database\Eloquent\Builder;
@@ -18,7 +19,6 @@ use Livewire\Attributes\Locked;
 use Livewire\Attributes\On;
 use Livewire\Component;
 use Livewire\WithPagination;
-use Mary\Traits\Toast;
 
 class RestoreModal extends Component
 {
@@ -100,9 +100,10 @@ class RestoreModal extends Component
     {
         $this->selectedSnapshotId = $snapshotId;
 
-        // Pre-fill schema name: use target server's first database path for SQLite, otherwise snapshot's database name
-        if ($this->targetServer?->database_type === DatabaseType::SQLITE && ! empty($this->targetServer->database_names)) {
-            $this->schemaName = $this->targetServer->database_names[0];
+        // Pre-fill schema name: use target server's first SQLite path for SQLite, otherwise snapshot's database name
+        if ($this->targetServer?->database_type === DatabaseType::SQLITE) {
+            $paths = $this->targetServer->resolveDatabaseNames();
+            $this->schemaName = $paths[0] ?? Snapshot::findOrFail($snapshotId)->database_name;
         } else {
             $this->schemaName = Snapshot::findOrFail($snapshotId)->database_name;
         }
@@ -187,13 +188,14 @@ class RestoreModal extends Component
 
             ProcessRestoreJob::dispatch($restore->id);
 
-            $this->success('Restore started successfully!');
+            $this->success(__('Restore started successfully!'));
 
             $this->showModal = false;
 
             $this->dispatch('restore-completed');
         } catch (\Exception $e) {
-            $this->error('Failed to queue restore: '.$e->getMessage());
+            report($e);
+            $this->error(__('Failed to queue restore. Please try again.'));
         }
     }
 

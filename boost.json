@@ -2,15 +2,17 @@
     "agents": [
         "claude_code"
     ],
+    "cloud": false,
     "guidelines": true,
     "herd_mcp": false,
     "mcp": true,
     "sail": false,
     "skills": [
+        "fortify-development",
+        "laravel-best-practices",
         "mcp-development",
         "socialite-development",
         "livewire-development",
-        "pest-testing",
-        "tailwindcss-development"
+        "pest-testing"
     ]
 }

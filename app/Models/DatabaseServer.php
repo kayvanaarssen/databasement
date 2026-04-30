@@ -2,8 +2,9 @@
 
 namespace App\Models;
 
-use App\Enums\DatabaseSelectionMode;
 use App\Enums\DatabaseType;
+use App\Enums\NotificationChannelSelection;
+use App\Enums\NotificationTrigger;
 use App\Exceptions\Backup\EncryptionException;
 use Database\Factories\DatabaseServerFactory;
 use Illuminate\Contracts\Encryption\DecryptException;
@@ -13,8 +14,8 @@ use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Support\Carbon;
 
 /**
@@ -25,29 +26,30 @@ use Illuminate\Support\Carbon;
  * @property DatabaseType $database_type
  * @property string $username
  * @property string $password
- * @property array<string>|null $database_names
- * @property DatabaseSelectionMode|null $database_selection_mode
- * @property string|null $database_include_pattern
  * @property array<string, mixed>|null $extra_config
  * @property string|null $description
  * @property bool $backups_enabled
  * @property string|null $ssh_config_id
  * @property string|null $agent_id
  * @property string|null $managed_by
+ * @property NotificationTrigger $notification_trigger
+ * @property NotificationChannelSelection $notification_channel_selection
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  * @property-read Agent|null $agent
- * @property-read Backup|null $backup
+ * @property-read Collection<int, Backup> $backups
+ * @property-read int|null $backups_count
  * @property-read DatabaseServerSshConfig|null $sshConfig
  * @property-read Collection<int, Snapshot> $snapshots
  * @property-read int|null $snapshots_count
+ * @property-read Collection<int, NotificationChannel> $notificationChannels
+ * @property-read int|null $notification_channels_count
  *
  * @method static DatabaseServerFactory factory($count = null, $state = [])
  * @method static Builder<static>|DatabaseServer newModelQuery()
  * @method static Builder<static>|DatabaseServer newQuery()
  * @method static Builder<static>|DatabaseServer query()
  * @method static Builder<static>|DatabaseServer whereCreatedAt($value)
- * @method static Builder<static>|DatabaseServer whereDatabaseNames($value)
  * @method static Builder<static>|DatabaseServer whereDatabaseType($value)
  * @method static Builder<static>|DatabaseServer whereDescription($value)
  * @method static Builder<static>|DatabaseServer whereHost($value)
@@ -57,7 +59,6 @@ use Illuminate\Support\Carbon;
  * @method static Builder<static>|DatabaseServer wherePort($value)
  * @method static Builder<static>|DatabaseServer whereUpdatedAt($value)
  * @method static Builder<static>|DatabaseServer whereUsername($value)
- * @method static Builder<static>|DatabaseServer whereDatabaseSelectionMode($value)
  * @method static Builder<static>|DatabaseServer whereBackupsEnabled($value)
  *
  * @mixin \Eloquent
@@ -70,6 +71,22 @@ class DatabaseServer extends Model
     use HasUlids;
 
     public bool $skipFileCleanup = false;
+
+    /**
+     * Transient state passed from factories to configure the server's default
+     * Backup row in an afterCreating hook. Never persisted.
+     *
+     * @var array<string, mixed>
+     */
+    public array $pendingBackupState = [];
+
+    /**
+     * Transient database_names used for connection testing (SQLite file paths
+     * or selected database list). Not persisted — lives on the Backup model.
+     *
+     * @var array<int, string>|null
+     */
+    public ?array $pendingDatabaseNames = null;
 
     protected static function booted(): void
     {
@@ -96,15 +113,14 @@ class DatabaseServer extends Model
         'database_type',
         'username',
         'password',
-        'database_names',
-        'database_selection_mode',
-        'database_include_pattern',
         'description',
         'backups_enabled',
         'ssh_config_id',
         'agent_id',
         'extra_config',
         'managed_by',
+        'notification_trigger',
+        'notification_channel_selection',
     ];
 
     protected $hidden = [
@@ -116,11 +132,11 @@ class DatabaseServer extends Model
         return [
             'port' => 'integer',
             'database_type' => DatabaseType::class,
-            'database_selection_mode' => DatabaseSelectionMode::class,
             'backups_enabled' => 'boolean',
             'password' => 'encrypted',
-            'database_names' => 'array',
             'extra_config' => 'array',
+            'notification_trigger' => NotificationTrigger::class,
+            'notification_channel_selection' => NotificationChannelSelection::class,
         ];
     }
 
@@ -133,11 +149,11 @@ class DatabaseServer extends Model
     }
 
     /**
-     * @return HasOne<Backup, DatabaseServer>
+     * @return HasMany<Backup, DatabaseServer>
      */
-    public function backup(): HasOne
+    public function backups(): HasMany
     {
-        return $this->hasOne(Backup::class);
+        return $this->hasMany(Backup::class);
     }
 
     /**
@@ -146,6 +162,14 @@ class DatabaseServer extends Model
     public function snapshots(): HasMany
     {
         return $this->hasMany(Snapshot::class);
+    }
+
+    /**
+     * @return BelongsToMany<NotificationChannel, DatabaseServer>
+     */
+    public function notificationChannels(): BelongsToMany
+    {
+        return $this->belongsToMany(NotificationChannel::class, 'database_server_notification_channel');
     }
 
     /**
@@ -207,7 +231,7 @@ class DatabaseServer extends Model
         $server->database_type = $config['database_type'] ?? 'mysql';
         $server->username = $config['username'] ?? '';
         $server->password = $config['password'] ?? '';
-        $server->database_names = $config['database_names'] ?? null;
+        $server->pendingDatabaseNames = $config['database_names'] ?? null;
         $server->extra_config = $config['extra_config'] ?? null;
 
         if ($sshConfig !== null) {
@@ -219,12 +243,43 @@ class DatabaseServer extends Model
     }
 
     /**
+     * Collect the list of database names/paths this server is currently
+     * configured to target: the transient pending list (during connection
+     * testing), otherwise the flattened, de-duplicated union of every related
+     * Backup's `database_names`.
+     *
+     * @return array<int, string>
+     */
+    public function resolveDatabaseNames(): array
+    {
+        if ($this->pendingDatabaseNames !== null) {
+            return $this->pendingDatabaseNames;
+        }
+
+        $backups = $this->relationLoaded('backups')
+            ? $this->backups
+            : $this->backups()->get();
+
+        $names = [];
+
+        foreach ($backups as $backup) {
+            foreach ($backup->database_names ?? [] as $name) {
+                if ($name !== '') {
+                    $names[] = $name;
+                }
+            }
+        }
+
+        return array_values(array_unique($names));
+    }
+
+    /**
      * Get a short connection label for display (filename for SQLite, host:port for client-server).
      */
     public function getConnectionLabel(): string
     {
         if ($this->database_type === DatabaseType::SQLITE) {
-            return implode(', ', array_map('basename', $this->database_names ?? []));
+            return implode(', ', array_map('basename', $this->resolveDatabaseNames()));
         }
 
         return "{$this->host}:{$this->port}";
@@ -236,7 +291,7 @@ class DatabaseServer extends Model
     public function getConnectionDetails(): string
     {
         if ($this->database_type === DatabaseType::SQLITE) {
-            return implode(', ', $this->database_names ?? []);
+            return implode(', ', $this->resolveDatabaseNames());
         }
 
         return "{$this->host}:{$this->port}";
@@ -315,41 +370,6 @@ class DatabaseServer extends Model
     }
 
     /**
-     * Normalize selection mode and clear irrelevant fields based on database type.
-     *
-     * @param  array<string, mixed>  $data
-     */
-    public static function normalizeSelectionMode(array &$data): void
-    {
-        $type = $data['database_type'] ?? '';
-
-        if ($type === DatabaseType::REDIS->value) {
-            $data['database_selection_mode'] = DatabaseSelectionMode::All->value;
-            $data['database_names'] = null;
-            $data['database_include_pattern'] = null;
-
-            return;
-        }
-
-        if ($type === DatabaseType::SQLITE->value) {
-            $data['database_selection_mode'] = DatabaseSelectionMode::Selected->value;
-            $data['database_include_pattern'] = null;
-
-            return;
-        }
-
-        $mode = $data['database_selection_mode'] ?? null;
-
-        if ($mode !== DatabaseSelectionMode::Selected->value) {
-            $data['database_names'] = null;
-        }
-
-        if ($mode !== DatabaseSelectionMode::Pattern->value) {
-            $data['database_include_pattern'] = null;
-        }
-    }
-
-    /**
      * Move type-specific fields (auth_source, dump_flags) into extra_config.
      * Clears stale keys when database type has changed.
      *
@@ -398,5 +418,26 @@ class DatabaseServer extends Model
         restore_error_handler();
 
         return $result;
+    }
+
+    /**
+     * Check if this server should send notifications for the given event type.
+     */
+    public function shouldNotifyOn(string $event): bool
+    {
+        return $this->notification_trigger->shouldNotifyOn($event);
+    }
+
+    /**
+     * Resolve which notification channels to use for this server.
+     *
+     * @return Collection<int, NotificationChannel>
+     */
+    public function resolveNotificationChannels(): Collection
+    {
+        return match ($this->notification_channel_selection) {
+            NotificationChannelSelection::All => NotificationChannel::all(),
+            NotificationChannelSelection::Selected => $this->notificationChannels,
+        };
     }
 }

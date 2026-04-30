@@ -3,17 +3,20 @@
 namespace App\Livewire\DatabaseServer;
 
 use App\Enums\DatabaseType;
+use App\Models\Backup;
 use App\Models\DatabaseServer;
+use App\Models\NotificationChannel;
 use App\Queries\DatabaseServerQuery;
 use App\Services\Backup\TriggerBackupAction;
+use App\Traits\Toast;
 use Illuminate\Contracts\View\View;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Support\Facades\View as ViewFacade;
 use Livewire\Attributes\Locked;
 use Livewire\Attributes\Title;
 use Livewire\Attributes\Url;
 use Livewire\Component;
 use Livewire\WithPagination;
-use Mary\Traits\Toast;
 
 #[Title('Database Servers')]
 class Index extends Component
@@ -59,7 +62,7 @@ class Index extends Component
     {
         $this->reset('search');
         $this->resetPage();
-        $this->success('Filters cleared.', position: 'toast-bottom');
+        $this->success(__('Filters cleared.'));
     }
 
     /**
@@ -68,10 +71,10 @@ class Index extends Component
     public function headers(): array
     {
         return [
-            ['key' => 'name', 'label' => __('Name'), 'class' => 'w-80'],
-            ['key' => 'database_names', 'label' => __('Databases'), 'sortable' => false],
-            ['key' => 'backup', 'label' => __('Backup'), 'sortable' => false],
-            ['key' => 'jobs', 'label' => __('Jobs'), 'sortable' => false, 'class' => 'w-32'],
+            ['key' => 'name', 'label' => __('Name'), 'class' => 'w-48'],
+            ['key' => 'backup', 'label' => __('Backup'), 'sortable' => false, 'class' => 'overflow-hidden hidden sm:table-cell'],
+            ['key' => 'jobs', 'label' => __('Jobs'), 'sortable' => false, 'class' => 'w-16 hidden sm:table-cell'],
+            ['key' => 'actions', 'label' => null, 'sortable' => false, 'class' => 'w-32'],
         ];
     }
 
@@ -102,7 +105,7 @@ class Index extends Component
         $this->deleteId = null;
         $this->showDeleteModal = false;
 
-        $this->success('Database server deleted successfully!', position: 'toast-bottom');
+        $this->success(__('Database server deleted successfully!'));
     }
 
     public function confirmRestore(string $id): void
@@ -114,7 +117,7 @@ class Index extends Component
         $this->restoreId = $id;
 
         if ($server->agent_id) {
-            $this->error(__('Restore is not yet supported for agent-backed servers.'), position: 'toast-bottom');
+            $this->error(__('Restore is not yet supported for agent-backed servers.'));
 
             return;
         }
@@ -152,8 +155,9 @@ class Index extends Component
             : $server->host.':'.$server->port;
 
         $db = '';
-        if ($server->database_names && count($server->database_names) === 1) {
-            $db = $server->database_names[0];
+        $databaseNames = $server->backups->first()?->database_names;
+        if ($databaseNames && count($databaseNames) === 1) {
+            $db = $databaseNames[0];
         }
 
         try {
@@ -178,18 +182,73 @@ class Index extends Component
         );
     }
 
-    public function runBackup(string $id, TriggerBackupAction $action): void
+    public function runBackup(string $backupId, TriggerBackupAction $action): void
     {
-        $server = DatabaseServer::with(['backup.volume'])->findOrFail($id);
+        $backup = Backup::with(['databaseServer', 'volume', 'backupSchedule'])->findOrFail($backupId);
 
-        $this->authorize('backup', $server);
+        $this->authorize('backup', $backup->databaseServer);
 
         try {
             $userId = auth()->id();
-            $result = $action->execute($server, is_int($userId) ? $userId : null);
-            $this->success($result['message'], position: 'toast-bottom');
+            $action->execute($backup, is_int($userId) ? $userId : null);
+            $this->success(
+                title: __('Backup started successfully!'),
+                description: $backup->getDisplayLabel(),
+            );
         } catch (\Throwable $e) {
-            $this->error($e->getMessage(), position: 'toast-bottom');
+            $this->error($e->getMessage(), timeout: 0);
+        }
+    }
+
+    public function runBackupAll(string $serverId, TriggerBackupAction $action): void
+    {
+        $server = DatabaseServer::with(['backups.volume', 'backups.backupSchedule'])->findOrFail($serverId);
+
+        $this->authorize('backup', $server);
+
+        $userId = auth()->id();
+        $results = [];
+
+        foreach ($server->backups as $backup) {
+            try {
+                $action->execute($backup, is_int($userId) ? $userId : null);
+                $results[$backup->getDisplayLabel()] = 'success';
+            } catch (\Throwable $e) {
+                $results[$backup->getDisplayLabel()] = $e->getMessage();
+            }
+        }
+
+        // Determine overall status
+        $successCount = count(array_filter($results, fn ($v) => $v === 'success'));
+        $failureCount = count(array_filter($results, fn ($v) => $v !== 'success'));
+
+        // Build description with one line per backup config
+        $description = implode("\n", array_map(function ($label, $status) {
+            $icon = $status === 'success' ? '✓' : '✗';
+
+            return "{$icon} {$label}";
+        }, array_keys($results), array_values($results)));
+
+        // Determine toast type based on results
+        if ($failureCount === 0) {
+            $this->success(
+                title: __('All backups started successfully!'),
+                description: $description,
+            );
+        } elseif ($successCount === 0) {
+            $this->error(
+                title: __('All backups failed!'),
+                description: $description,
+                timeout: 0
+            );
+        } else {
+            $this->warning(
+                title: __(':count backups started, :failures failed', [
+                    'count' => $successCount,
+                    'failures' => $failureCount,
+                ]),
+                description: $description,
+            );
         }
     }
 
@@ -200,6 +259,9 @@ class Index extends Component
             sortColumn: $this->sortBy['column'],
             sortDirection: $this->sortBy['direction']
         )->paginate(10);
+
+        // Share total count globally so it's available inside Mary UI scoped slots
+        ViewFacade::share('totalNotificationChannels', NotificationChannel::count());
 
         return view('livewire.database-server.index', [
             'servers' => $servers,

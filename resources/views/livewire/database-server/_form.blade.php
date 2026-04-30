@@ -1,7 +1,6 @@
 @props(['form', 'submitLabel' => 'Save', 'cancelRoute' => 'database-servers.index', 'isEdit' => false])
 
 @php
-use App\Enums\DatabaseSelectionMode;
 use App\Enums\DatabaseType;
 @endphp
 
@@ -105,61 +104,26 @@ use App\Enums\DatabaseType;
                 <!-- Database Type Selection -->
                 <div>
                     <label class="label label-text font-semibold mb-2">{{ __('Database Type') }}</label>
-                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    <x-radio-card-group class="grid-cols-2 sm:grid-cols-5" :label="__('Database Type')">
                         @foreach(DatabaseType::cases() as $dbType)
-                            @php
-                                $isSelected = $form->database_type === $dbType->value;
-                                $buttonClass = $isSelected ? 'btn-primary' : 'btn-outline';
-                            @endphp
-                            <button
-                                type="button"
-                                wire:click="$set('form.database_type', '{{ $dbType->value }}')"
-                                class="btn justify-start gap-2 h-auto py-3 {{ $buttonClass }}"
-                            >
-                                <x-database-type-icon :type="$dbType" class="w-5 h-5" />
-                                <span>{{ $dbType->label() }}</span>
-                            </button>
+                            <x-radio-card
+                                :active="$form->database_type === $dbType->value"
+                                :icon="$dbType->icon()"
+                                :label="$dbType->label()"
+                                :value="$dbType->value"
+                                wire:model.live="form.database_type"
+                            />
                         @endforeach
-                    </div>
+                    </x-radio-card-group>
                 </div>
 
                 @if($form->database_type)
                     @include('livewire.database-server._ssh-tunnel-config', ['form' => $form, 'isEdit' => $isEdit])
 
                     @if($form->isSqlite())
-                        <!-- SQLite Paths -->
-                        <div class="space-y-3">
-                            <label class="label label-text font-semibold">{{ __('Database File Paths') }}</label>
-                            @foreach($form->database_names as $index => $path)
-                                <div wire:key="database-path-{{ $index }}" class="flex gap-2 items-center">
-                                    <div class="flex-1">
-                                        <x-input
-                                            wire:model="form.database_names.{{ $index }}"
-                                            placeholder="{{ __('e.g., /var/data/database.sqlite') }}"
-                                            type="text"
-                                        />
-                                    </div>
-                                    @if(count($form->database_names) > 1)
-                                        <x-button
-                                            wire:click="removeDatabasePath({{ $index }})"
-                                            icon="o-trash"
-                                            class="btn-ghost btn-square btn-sm text-error"
-                                            type="button"
-                                        />
-                                    @endif
-                                </div>
-                            @endforeach
-                            <x-button
-                                wire:click="addDatabasePath"
-                                icon="o-plus"
-                                class="btn-ghost btn-sm"
-                                :label="__('Add path')"
-                                type="button"
-                            />
-                            <p class="text-xs opacity-50">
-                                {{ $form->ssh_enabled ? __('Absolute paths on the remote SSH server') : __('Absolute paths to SQLite database files') }}
-                            </p>
-                        </div>
+                        {{-- SQLite file paths now live on each backup configuration below.
+                             SQLite needs no host/port/credentials here; connection testing
+                             reads the paths from the first backup card. --}}
                     @else
                         <!-- Client-server database connection fields -->
                         <div class="grid gap-4 md:grid-cols-2">
@@ -329,310 +293,251 @@ use App\Enums\DatabaseType;
         </div>
     @endif
 
-    <!-- Section 3: Database Selection (only shown after successful connection, agent assigned, not for SQLite, and when backups enabled) -->
-    @if(($form->connectionTestSuccess or $form->hasAgent() or $isEdit) && !$form->isSqlite() && !$form->isRedis() && $form->backups_enabled)
+    <!-- Section 3: Backup Configurations (collection of one or more) -->
+    @if(($form->connectionTestSuccess or $form->hasAgent() or $isEdit or $form->isSqlite()) && $form->backups_enabled)
+        @php
+            $volumes = $form->getAllVolumes();
+            $schedules = $form->getBackupSchedules();
+            $volumeOptions = $form->getVolumeOptions();
+            $scheduleOptions = $form->getScheduleOptions();
+        @endphp
+
         <div class="card bg-base-100 shadow-sm border border-base-200">
             <div class="card-body p-3 sm:p-8">
-                <div class="flex items-center gap-3 mb-4">
+                <!-- Card header -->
+                <div class="flex items-start gap-3 mb-6">
                     <span class="badge badge-primary badge-lg font-bold">3</span>
-                    <h3 class="card-title text-lg">{{ __('Database Selection') }}</h3>
+                    <div>
+                        <h3 class="card-title text-lg leading-snug">{{ __('Backup Configurations') }}</h3>
+                        <p class="text-xs text-base-content/60 mt-0.5">
+                            {{ __('Attach one or more backup configurations — each with its own schedule, volume, retention, and database selection.') }}
+                        </p>
+                    </div>
                 </div>
 
                 <div class="space-y-4">
-                    <!-- Segmented Control -->
-                    @php
-                        $modes = [
-                            DatabaseSelectionMode::All->value => ['icon' => 'o-circle-stack', 'label' => __('All Databases'), 'hint' => __('Backup everything')],
-                            DatabaseSelectionMode::Selected->value => ['icon' => 'o-check-badge', 'label' => __('Selected'), 'hint' => __('Pick specific ones')],
-                            DatabaseSelectionMode::Pattern->value => ['icon' => null, 'label' => __('Pattern'), 'hint' => __('Match by regex')],
-                        ];
-                    @endphp
-                    <div class="grid grid-cols-3 gap-2 rounded-xl bg-base-200 p-2">
-                        @foreach($modes as $mode => $opt)
-                            @php $isActive = $form->database_selection_mode === $mode; @endphp
-                            <button
-                                type="button"
-                                wire:click="$set('form.database_selection_mode', '{{ $mode }}')"
-                                class="flex flex-col items-center gap-1 rounded-lg px-3 py-3 text-center transition-all cursor-pointer {{ $isActive ? 'bg-base-100 shadow-sm ring-1 ring-base-300' : 'hover:bg-base-100/50' }}"
-                            >
-                                @if($opt['icon'])
-                                    <x-icon :name="$opt['icon']" class="w-5 h-5 {{ $isActive ? 'text-base-content' : 'text-base-content/50' }}" />
-                                @else
-                                    <x-icon-regex class="w-5 h-5 {{ $isActive ? 'text-base-content' : 'text-base-content/50' }}" />
-                                @endif
-                                <span class="text-sm font-semibold {{ $isActive ? 'text-base-content' : 'text-base-content/70' }}">{{ $opt['label'] }}</span>
-                                <span class="text-xs {{ $isActive ? 'text-base-content/60' : 'text-base-content/40' }}">{{ $opt['hint'] }}</span>
-                            </button>
-                        @endforeach
+                    @foreach($form->backups as $index => $backup)
+                        @include('livewire.database-server._backup-form', [
+                            'form' => $form,
+                            'index' => $index,
+                            'position' => $loop->iteration,
+                            'backup' => $backup,
+                            'volumes' => $volumes,
+                            'schedules' => $schedules,
+                            'volumeOptions' => $volumeOptions,
+                            'scheduleOptions' => $scheduleOptions,
+                        ])
+                    @endforeach
+
+                    <div class="flex justify-center pt-2">
+                        <x-button
+                            wire:click="addBackup"
+                            icon="o-plus"
+                            class="btn-outline btn-primary"
+                            :label="__('Add another backup configuration')"
+                            type="button"
+                        />
                     </div>
-
-                    <!-- All Databases Panel -->
-                    @if($form->database_selection_mode === DatabaseSelectionMode::All->value)
-                        <x-alert class="alert-info" icon="o-information-circle">
-                            {{ __('All user databases will be backed up. System databases are automatically excluded.') }}
-                            @if(count($form->availableDatabases) > 0)
-                                <span class="font-semibold">({{ count($form->availableDatabases) }} {{ __('available') }})</span>
-                            @endif
-                        </x-alert>
-                    @endif
-
-                    <!-- Selected Databases Panel -->
-                    @if($form->database_selection_mode === DatabaseSelectionMode::Selected->value)
-                        @if($form->loadingDatabases)
-                            <div class="flex items-center gap-2 text-base-content/70">
-                                <x-loading class="loading-spinner loading-sm" />
-                                {{ __('Loading databases...') }}
-                            </div>
-                        @elseif(count($form->availableDatabases) > 0)
-                            <x-choices-offline
-                                wire:model="form.database_names"
-                                label="{{ __('Select Databases') }}"
-                                :options="$form->availableDatabases"
-                                hint="{{ __('Select one or more databases to backup') }}"
-                                searchable
-                            />
-                        @else
-                            <x-input
-                                wire:model="form.database_names_input"
-                                label="{{ __('Database Names') }}"
-                                placeholder="{{ __('e.g., db1, db2, db3') }}"
-                                hint="{{ __('Enter database names separated by commas') }}"
-                                type="text"
-                                required
-                            />
-                        @endif
-                    @endif
-
-                    <!-- Pattern Panel -->
-                    @if($form->database_selection_mode === DatabaseSelectionMode::Pattern->value)
-                        <div class="space-y-3">
-                            <div>
-                                <div class="flex items-center justify-between mb-1">
-                                    <label class="text-xs font-medium text-base-content/70">{{ __('Include Pattern') }}</label>
-                                    <span class="font-mono text-[10px] text-base-content/40">regex · case-insensitive</span>
-                                </div>
-                                <div class="flex items-center gap-0">
-                                    <span class="bg-base-200 border border-r-0 border-base-300 rounded-l-lg px-3 py-2 text-base-content/50 font-mono text-sm">/</span>
-                                    <input
-                                        type="text"
-                                        wire:model.live.debounce.300ms="form.database_include_pattern"
-                                        class="input input-bordered rounded-none flex-1 font-mono text-sm"
-                                        placeholder="{{ __('e.g., ^prod_ or ^(?!test_)') }}"
-                                    />
-                                    <span class="bg-base-200 border border-l-0 border-base-300 rounded-r-lg px-3 py-2 text-base-content/50 font-mono text-sm">/i</span>
-                                </div>
-                                <div class="mt-2 text-xs text-base-content/50 space-y-1">
-                                    <div class="font-semibold">{{ __('Examples:') }}</div>
-                                    <div class="flex items-baseline gap-2">
-                                        <code class="bg-base-200 px-1.5 py-0.5 rounded font-mono shrink-0">^prod_</code>
-                                        <span>{{ __('matches databases starting with prod_') }}</span>
-                                    </div>
-                                    <div class="flex items-baseline gap-2">
-                                        <code class="bg-base-200 px-1.5 py-0.5 rounded font-mono shrink-0">^(?!test_)</code>
-                                        <span>{{ __('excludes databases starting with test_') }}</span>
-                                    </div>
-                                    <div class="flex items-baseline gap-2">
-                                        <code class="bg-base-200 px-1.5 py-0.5 rounded font-mono shrink-0">^(?!.*preprod)</code>
-                                        <span>{{ __('excludes databases containing preprod') }}</span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            @error('form.database_include_pattern')
-                                <x-alert class="alert-error" icon="o-x-circle">
-                                    {{ $message }}
-                                </x-alert>
-                            @enderror
-
-                            <!-- Live Preview -->
-                            @if(count($form->availableDatabases) > 0 && $form->database_include_pattern !== '')
-                                @php
-                                    $filteredDbs = $form->getFilteredDatabases();
-                                    $isValidPattern = \App\Models\DatabaseServer::isValidDatabasePattern($form->database_include_pattern);
-                                @endphp
-
-                                @if(!$isValidPattern)
-                                    <x-alert class="alert-warning" icon="o-exclamation-triangle">
-                                        {{ __('Invalid regular expression pattern.') }}
-                                    </x-alert>
-                                @else
-                                    <div class="border border-base-300 rounded-lg overflow-hidden">
-                                        <div class="bg-base-200 px-3 py-2 text-sm font-semibold border-b border-base-300">
-                                            {{ __('Preview') }} — {{ count($filteredDbs) }}/{{ count($form->availableDatabases) }} {{ __('databases matched') }}
-                                        </div>
-                                        <div class="max-h-48 overflow-y-auto divide-y divide-base-200">
-                                            @foreach($form->availableDatabases as $db)
-                                                @php $matched = in_array($db['name'], $filteredDbs); @endphp
-                                                <div class="flex items-center gap-2 px-3 py-1.5 text-sm {{ $matched ? '' : 'opacity-40' }}">
-                                                    @if($matched)
-                                                        <x-icon name="o-check-circle" class="w-4 h-4 text-success" />
-                                                    @else
-                                                        <x-icon name="o-minus-circle" class="w-4 h-4" />
-                                                    @endif
-                                                    <span class="font-mono">{{ $db['name'] }}</span>
-                                                </div>
-                                            @endforeach
-                                        </div>
-                                    </div>
-                                @endif
-                            @elseif(empty($form->availableDatabases))
-                                <x-alert class="alert-{{ $form->hasAgent() ? 'info' : 'warning' }}" icon="{{ $form->hasAgent() ? 'o-information-circle' : 'o-exclamation-triangle' }}">
-                                    {{ $form->hasAgent() ? __('Pattern preview is not available for agent-managed servers.') : __('Test connection to see pattern preview.') }}
-                                </x-alert>
-                            @endif
-                        </div>
-                    @endif
                 </div>
             </div>
         </div>
     @endif
 
-    <!-- Section 4: Backup Configuration (only shown when backups enabled) -->
-    @if(($form->connectionTestSuccess or $form->hasAgent() or $isEdit) && $form->backups_enabled)
+    <!-- Section 4: Notifications -->
+    @if($form->connectionTestSuccess or $form->hasAgent() or $isEdit or $form->isSqlite())
         <div class="card bg-base-100 shadow-sm border border-base-200">
             <div class="card-body p-3 sm:p-8">
                 <div class="flex items-center gap-3 mb-4">
-                    <span class="badge badge-primary badge-lg font-bold">{{ ($form->isSqlite() || $form->isRedis()) ? '3' : '4' }}</span>
-                    <h3 class="card-title text-lg">{{ __('Backup Configuration') }}</h3>
+                    <span class="badge badge-primary badge-lg font-bold">{{ $form->backups_enabled ? 4 : 3 }}</span>
+                    <h3 class="card-title text-lg">{{ __('Notifications') }}</h3>
                 </div>
 
-                <div class="space-y-4">
-                    <x-select
-                        wire:model="form.volume_id"
-                        label="{{ __('Storage Volume') }}"
-                        :options="$form->getVolumeOptions()"
-                        placeholder="{{ __('Select a storage volume') }}"
-                        placeholder-value=""
-                        required
-                    >
-                        <x-slot:append>
-                            <x-button
-                                wire:click="refreshVolumes"
-                                icon="o-arrow-path"
-                                class="btn-ghost join-item"
-                                tooltip-bottom="{{ __('Refresh volume list') }}"
-                                spinner
-                            />
-                            <x-button
-                                link="{{ route('volumes.create') }}"
-                                icon="o-plus"
-                                class="btn-ghost join-item"
-                                tooltip-bottom="{{ __('Create new volume') }}"
-                                external
-                            />
-                        </x-slot:append>
-                    </x-select>
+                @php
+                    $notificationChannels = $form->getNotificationChannels();
+                    $hasChannels = $notificationChannels->isNotEmpty();
+                    $isDisabled = $form->notification_trigger === 'none';
+                    $triggerOptions = [
+                        'all' => ['icon' => 'o-bell-alert', 'label' => __('All events'), 'hint' => __('Success & failure'), 'color' => 'info'],
+                        'success' => ['icon' => 'o-check-circle', 'label' => __('Success only'), 'hint' => __('Completed backups'), 'color' => 'success'],
+                        'failure' => ['icon' => 'o-exclamation-triangle', 'label' => __('Failure only'), 'hint' => __('Errors & timeouts'), 'color' => 'error'],
+                        'none' => ['icon' => 'o-bell-slash', 'label' => __('Disabled'), 'hint' => __('No notifications'), 'color' => 'default'],
+                    ];
+                @endphp
 
-                    <x-input
-                        wire:model="form.path"
-                        label="{{ __('Subfolder Path') }}"
-                        placeholder="{{ __('e.g., backups/{year}/{month}/{day}') }}"
-                        hint="{{ __('Optional path to organize backups. Supports {year}, {month}, {day} variables (e.g., backups/{year}/{month} → backups/2026/02).') }}"
-                        type="text"
-                        icon="o-folder"
-                    />
+                <div class="space-y-5">
+                    <!-- Trigger selection -->
+                    <div class="space-y-2">
+                        <div>
+                            <p class="text-sm font-semibold">{{ __('Notify me on') }}</p>
+                            <p class="text-xs text-base-content/60">{{ __('When should this server send a notification?') }}</p>
+                        </div>
+                        <x-radio-card-group class="grid-cols-2 sm:grid-cols-4" :label="__('Notification trigger')">
+                            @foreach($triggerOptions as $value => $opt)
+                                <x-radio-card
+                                    :active="$form->notification_trigger === $value"
+                                    :color="$opt['color']"
+                                    :icon="$opt['icon']"
+                                    :label="$opt['label']"
+                                    :hint="$opt['hint']"
+                                    :value="$value"
+                                    wire:model.live="form.notification_trigger"
+                                />
+                            @endforeach
+                        </x-radio-card-group>
+                    </div>
 
-                    <x-select
-                        wire:model="form.backup_schedule_id"
-                        label="{{ __('Backup Schedule') }}"
-                        :options="$form->getScheduleOptions()"
-                        placeholder="{{ __('Select a schedule') }}"
-                        placeholder-value=""
-                        required
-                    >
-                        <x-slot:append>
-                            <x-button
-                                wire:click="refreshSchedules"
-                                icon="o-arrow-path"
-                                class="btn-ghost join-item"
-                                tooltip-bottom="{{ __('Refresh schedule list') }}"
-                                spinner
-                            />
-                            <x-button
-                                link="{{ route('configuration.index') }}"
-                                icon="o-plus"
-                                class="btn-ghost join-item"
-                                tooltip-bottom="{{ __('Manage schedules') }}"
-                                external
-                            />
-                        </x-slot:append>
-                    </x-select>
-
-                    <x-select
-                        wire:model.live="form.retention_policy"
-                        label="{{ __('Retention Policy') }}"
-                        :options="$form->getRetentionPolicyOptions()"
-                    />
-
-                    @if($form->retention_policy === 'days')
-                        <x-input
-                            wire:model="form.retention_days"
-                            label="{{ __('Retention Period (days)') }}"
-                            placeholder="{{ __('e.g., 30') }}"
-                            hint="{{ __('Snapshots older than this will be automatically deleted.') }}"
-                            type="number"
-                            min="1"
-                            max="365"
-                            required
-                        />
-                    @elseif($form->retention_policy === 'gfs')
-                        <div class="p-4 rounded-lg bg-base-200 space-y-4">
-                            <div class="flex items-start gap-3">
-                                <x-icon name="o-information-circle" class="w-5 h-5 text-info shrink-0 mt-0.5" />
-                                <div>
-                                    <p class="text-sm font-medium">{{ __('Grandfather-Father-Son (GFS) Retention') }}</p>
-                                    <p class="text-sm text-base-content/70 mt-1">
-                                        {{ __('Keeps recent backups for quick recovery while preserving older snapshots for archival. Retention is applied per database. Default: 7 daily + 4 weekly + 12 monthly backups.') }}
+                    <!-- Channel selection (hidden when disabled) -->
+                    @if(! $isDisabled)
+                        @if(! $hasChannels)
+                            <!-- Empty state: no channels exist at all -->
+                            <div class="flex flex-col items-center justify-center gap-4 rounded-lg border-2 border-dashed border-base-300 bg-base-200/50 px-6 py-10 text-center">
+                                <span class="inline-flex items-center justify-center rounded-full bg-base-200 p-3">
+                                    <x-icon name="o-bell-alert" class="w-6 h-6 text-base-content/50" />
+                                </span>
+                                <div class="space-y-1">
+                                    <p class="text-sm font-semibold">{{ __('No notification channels yet') }}</p>
+                                    <p class="text-xs text-base-content/60 max-w-xs">
+                                        {{ __('Add at least one channel (Email, Slack, Webhook…) to receive backup alerts.') }}
                                     </p>
                                 </div>
-                            </div>
-
-                            <x-button
-                                label="{{ __('View GFS Documentation') }}"
-                                link="https://david-crty.github.io/databasement/user-guide/backups/#retention-policies"
-                                external
-                                class="btn-ghost btn-sm"
-                                icon="o-arrow-top-right-on-square"
-                            />
-
-                            <div class="grid gap-4 md:grid-cols-3">
-                                <x-input
-                                    wire:model="form.gfs_keep_daily"
-                                    label="{{ __('Daily') }}"
-                                    placeholder="{{ __('e.g., 7') }}"
-                                    hint="{{ __('Last N days') }}"
-                                    type="number"
-                                    min="0"
-                                    max="90"
-                                />
-                                <x-input
-                                    wire:model="form.gfs_keep_weekly"
-                                    label="{{ __('Weekly') }}"
-                                    placeholder="{{ __('e.g., 4') }}"
-                                    hint="{{ __('1/week for N weeks') }}"
-                                    type="number"
-                                    min="0"
-                                    max="52"
-                                />
-                                <x-input
-                                    wire:model="form.gfs_keep_monthly"
-                                    label="{{ __('Monthly') }}"
-                                    placeholder="{{ __('e.g., 12') }}"
-                                    hint="{{ __('1/month for N months') }}"
-                                    type="number"
-                                    min="0"
-                                    max="24"
+                                <x-button
+                                    icon="o-plus"
+                                    class="btn-primary btn-sm"
+                                    link="{{ route('configuration.index') }}#notification-channels"
+                                    external
+                                    :label="__('Create your first channel')"
                                 />
                             </div>
+                        @else
+                            <!-- Channel selection mode -->
+                            <div class="space-y-2">
+                                <div>
+                                    <p class="text-sm font-semibold">{{ __('Send to') }}</p>
+                                    <p class="text-xs text-base-content/60">{{ __('Target one or all of your notification channels.') }}</p>
+                                </div>
+                                @php
+                                    $modeOptions = [
+                                        'all' => [
+                                            'icon' => 'o-user-group',
+                                            'label' => __('All channels'),
+                                            'hint' => __(':count configured', ['count' => $notificationChannels->count()]),
+                                        ],
+                                        'selected' => [
+                                            'icon' => 'o-adjustments-horizontal',
+                                            'label' => __('Specific channels'),
+                                            'hint' => __('Pick individual channels'),
+                                        ],
+                                    ];
+                                @endphp
+                                <x-radio-card-group class="grid-cols-1 sm:grid-cols-2" :label="__('Send to')">
+                                    @foreach($modeOptions as $value => $opt)
+                                        <x-radio-card
+                                            :active="$form->notification_channel_selection === $value"
+                                            :icon="$opt['icon']"
+                                            :label="$opt['label']"
+                                            :hint="$opt['hint']"
+                                            :value="$value"
+                                            horizontal
+                                            wire:model.live="form.notification_channel_selection"
+                                        />
+                                    @endforeach
+                                </x-radio-card-group>
+                            </div>
 
-                            <p class="text-xs text-base-content/50">
-                                {{ __('Leave any tier at 0 to disable it. Snapshots matching multiple tiers are counted only once.') }}
+                            <!-- Channel picker (when 'selected') -->
+                            @if($form->notification_channel_selection === 'selected')
+                                @php $hasChannelError = $errors->has('form.notification_channel_ids'); @endphp
+                                <div class="space-y-2">
+                                    <div class="flex items-center justify-between gap-2">
+                                        <div>
+                                            <p class="text-sm font-semibold {{ $hasChannelError ? 'text-error' : '' }}">{{ __('Select channels') }}</p>
+                                            <p class="text-xs {{ $hasChannelError ? 'text-error/80' : 'text-base-content/60' }}">
+                                                {{ __(':selected of :total selected', ['selected' => count($form->notification_channel_ids), 'total' => $notificationChannels->count()]) }}
+                                            </p>
+                                        </div>
+                                        @if(count($form->notification_channel_ids) > 0)
+                                            <button
+                                                type="button"
+                                                wire:click="$set('form.notification_channel_ids', [])"
+                                                class="text-xs text-base-content/60 hover:text-base-content hover:underline cursor-pointer"
+                                            >
+                                                {{ __('Clear all') }}
+                                            </button>
+                                        @endif
+                                    </div>
+                                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                        @foreach($notificationChannels as $channel)
+                                            @php $isSelected = in_array($channel->id, $form->notification_channel_ids, true); @endphp
+                                            <button
+                                                type="button"
+                                                role="checkbox"
+                                                aria-checked="{{ $isSelected ? 'true' : 'false' }}"
+                                                wire:click="toggleNotificationChannel('{{ $channel->id }}')"
+                                                wire:key="channel-card-{{ $channel->id }}"
+                                                class="relative flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all cursor-pointer {{ $isSelected ? 'border-primary bg-primary/5 shadow-sm' : 'border-base-300 bg-base-100 hover:bg-base-200' }}"
+                                            >
+                                                <span class="shrink-0 rounded-md p-2 {{ $isSelected ? 'bg-primary/10 text-primary' : 'bg-base-200 text-base-content/60' }}">
+                                                    <x-icon :name="$channel->type->icon()" class="w-5 h-5" />
+                                                </span>
+                                                <span class="flex-1 min-w-0">
+                                                    <span class="block text-sm font-semibold truncate">{{ $channel->name }}</span>
+                                                    <span class="block text-xs text-base-content/60 truncate">{{ $channel->type->label() }}</span>
+                                                </span>
+                                                <span class="shrink-0 w-5 h-5 rounded-md border-2 flex items-center justify-center {{ $isSelected ? 'border-primary bg-primary' : 'border-base-300' }}">
+                                                    @if($isSelected)
+                                                        <x-icon name="s-check" class="w-3.5 h-3.5 text-primary-content" />
+                                                    @endif
+                                                </span>
+                                            </button>
+                                        @endforeach
+                                    </div>
+                                    @if($hasChannelError)
+                                        <x-alert class="alert-error" icon="o-x-circle">
+                                            {{ __('Select at least one channel, or switch to “All channels”.') }}
+                                        </x-alert>
+                                    @endif
+                                </div>
+                            @endif
+                        @endif
+                    @endif
+
+                    <!-- Live summary -->
+                    @php
+                        $channelCount = $form->notification_channel_selection === 'all'
+                            ? $notificationChannels->count()
+                            : count($form->notification_channel_ids);
+                        $summaryHasChannels = $channelCount > 0;
+                        $triggerLabels = [
+                            'all' => __('all events'),
+                            'success' => __('success events only'),
+                            'failure' => __('failure events only'),
+                        ];
+                    @endphp
+                    @if($isDisabled)
+                        <div class="flex items-start gap-2.5 rounded-lg border border-base-300 bg-base-200 px-4 py-3">
+                            <x-icon name="o-bell-slash" class="w-5 h-5 text-base-content/50 shrink-0 mt-0.5" />
+                            <p class="text-sm text-base-content/70 leading-snug">
+                                {{ __('Notifications are disabled for this server. No alerts will be sent.') }}
                             </p>
                         </div>
-                    @else
-                        <x-alert class="alert-warning" icon="o-exclamation-triangle">
-                            {{ __('All snapshots will be kept indefinitely. Make sure you have enough storage space or manually delete old snapshots.') }}
-                        </x-alert>
+                    @elseif($hasChannels && $summaryHasChannels)
+                        <div class="flex items-start gap-2.5 rounded-lg border border-success/30 bg-success/5 px-4 py-3">
+                            <x-icon name="o-bell-alert" class="w-5 h-5 text-success shrink-0 mt-0.5" />
+                            <p class="text-sm leading-snug">
+                                {{ __('Notifications will be sent to') }}
+                                <span class="font-semibold">{{ trans_choice('{1} :count channel|[2,*] :count channels', $channelCount, ['count' => $channelCount]) }}</span>
+                                {{ __('on') }}
+                                <span class="font-semibold">{{ $triggerLabels[$form->notification_trigger] ?? '' }}</span>.
+                            </p>
+                        </div>
+                    @elseif($hasChannels)
+                        <div class="flex items-start gap-2.5 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
+                            <x-icon name="o-exclamation-triangle" class="w-5 h-5 text-warning shrink-0 mt-0.5" />
+                            <p class="text-sm leading-snug">
+                                <span class="font-semibold">{{ __('No channels selected.') }}</span>
+                                {{ __('Pick at least one channel above, or switch to “All channels”.') }}
+                            </p>
+                        </div>
                     @endif
                 </div>
             </div>

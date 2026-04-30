@@ -2,14 +2,16 @@
 
 namespace App\Livewire\Configuration;
 
+use App\Enums\NotificationChannelType;
 use App\Jobs\CleanupExpiredSnapshotsJob;
 use App\Jobs\VerifySnapshotFileJob;
 use App\Livewire\Forms\ConfigurationForm;
+use App\Livewire\Forms\NotificationChannelForm;
 use App\Models\BackupSchedule;
-use App\Models\DatabaseServer;
-use App\Models\Snapshot;
+use App\Models\NotificationChannel;
 use App\Services\Backup\TriggerBackupAction;
-use App\Services\FailureNotificationService;
+use App\Services\NotificationService;
+use App\Traits\Toast;
 use Illuminate\Contracts\View\View;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Log;
@@ -18,7 +20,6 @@ use Illuminate\Validation\Rule;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
 use Livewire\Component;
-use Mary\Traits\Toast;
 use Symfony\Component\HttpFoundation\Response;
 
 #[Title('Configuration')]
@@ -28,6 +29,9 @@ class Index extends Component
 
     public ConfigurationForm $form;
 
+    public NotificationChannelForm $channelForm;
+
+    // Schedule modal state
     public bool $showScheduleModal = false;
 
     public ?string $editingScheduleId = null;
@@ -35,6 +39,15 @@ class Index extends Component
     public ?string $deleteScheduleId = null;
 
     public bool $showDeleteScheduleModal = false;
+
+    // Notification channel modal state
+    public bool $showChannelModal = false;
+
+    public ?string $editingChannelId = null;
+
+    public ?string $deleteChannelId = null;
+
+    public bool $showDeleteChannelModal = false;
 
     public function mount(): void
     {
@@ -79,16 +92,6 @@ class Index extends Component
                 'env' => 'TRUSTED_PROXIES',
                 'value' => config('app.trusted_proxies') ?: '-',
                 'description' => __('IP addresses or CIDR ranges of trusted reverse proxies. Use "*" to trust all.'),
-            ],
-            [
-                'env' => 'OCTANE_ENABLED',
-                'value' => config('octane.enabled') ? 'true' : 'false',
-                'description' => __('Enable Laravel Octane for improved performance. Enabled by default in Docker.'),
-            ],
-            [
-                'env' => 'OCTANE_WORKERS',
-                'value' => (string) config('octane.workers'),
-                'description' => __('Number of Octane worker processes. Each worker holds a database connection. Use "auto" for 2x CPU cores.'),
             ],
         ];
     }
@@ -144,7 +147,7 @@ class Index extends Component
         $this->form->saveBackup();
 
         if ($this->restartScheduler()) {
-            $this->success(__('Backup configuration saved.'), position: 'toast-bottom');
+            $this->success(__('Backup configuration saved.'));
         }
     }
 
@@ -154,7 +157,7 @@ class Index extends Component
 
         CleanupExpiredSnapshotsJob::dispatch();
 
-        $this->success(__('Snapshot cleanup job dispatched.'), position: 'toast-bottom');
+        $this->success(__('Snapshot cleanup job dispatched.'));
     }
 
     public function runVerifyFiles(): void
@@ -163,18 +166,10 @@ class Index extends Component
 
         VerifySnapshotFileJob::dispatch();
 
-        $this->success(__('Snapshot file verification job dispatched.'), position: 'toast-bottom');
+        $this->success(__('Snapshot file verification job dispatched.'));
     }
 
-    public function saveNotificationConfig(): void
-    {
-        abort_unless(auth()->user()->isAdmin(), Response::HTTP_FORBIDDEN);
-
-        $this->form->saveNotifications();
-
-        $this->dispatch('notification-saved');
-        $this->success(__('Notification configuration saved.'), position: 'toast-bottom');
-    }
+    // --- Backup Schedules ---
 
     public function openScheduleModal(?string $scheduleId = null): void
     {
@@ -220,7 +215,7 @@ class Index extends Component
         $this->form->resetScheduleFields();
 
         if ($this->restartScheduler()) {
-            $this->success(__('Backup schedule saved.'), position: 'toast-bottom');
+            $this->success(__('Backup schedule saved.'));
         }
     }
 
@@ -241,7 +236,7 @@ class Index extends Component
         $schedule = BackupSchedule::withCount('backups')->findOrFail($this->deleteScheduleId);
 
         if ($schedule->backups_count > 0) {
-            $this->error(__('Cannot delete a schedule that is in use by database servers.'), position: 'toast-bottom');
+            $this->error(__('Cannot delete a schedule that is in use by database servers.'));
             $this->showDeleteScheduleModal = false;
             $this->deleteScheduleId = null;
 
@@ -253,39 +248,7 @@ class Index extends Component
         $this->deleteScheduleId = null;
 
         if ($this->restartScheduler()) {
-            $this->success(__('Backup schedule deleted.'), position: 'toast-bottom');
-        }
-    }
-
-    public function sendTestNotification(): void
-    {
-        abort_unless(auth()->user()->isAdmin(), Response::HTTP_FORBIDDEN);
-
-        $service = app(FailureNotificationService::class);
-        $routes = $service->getNotificationRoutes();
-
-        if (empty($routes)) {
-            $this->error(__('No notification channels configured. Please configure at least one notification channel.'), position: 'toast-bottom');
-
-            return;
-        }
-
-        try {
-            $server = new DatabaseServer(['name' => '[TEST] Production Database']);
-            $snapshot = new Snapshot([
-                'database_name' => 'app_production',
-                'backup_job_id' => 'test-notification',
-            ]);
-            $snapshot->setRelation('databaseServer', $server);
-
-            $exception = new \Exception('SQLSTATE[HY000] [2002] Connection refused (This is a test notification)');
-
-            $service->notifyBackupFailed($snapshot, $exception);
-
-            $channelNames = implode(', ', array_keys($routes));
-            $this->success(__('Test notification sent to: :channels', ['channels' => $channelNames]), position: 'toast-bottom');
-        } catch (\Throwable $e) {
-            $this->error(__('Failed to send test notification: :message', ['message' => $e->getMessage()]), position: 'toast-bottom');
+            $this->success(__('Backup schedule deleted.'));
         }
     }
 
@@ -297,7 +260,7 @@ class Index extends Component
 
         $backups = $schedule->backups()
             ->whereRelation('databaseServer', 'backups_enabled', true)
-            ->with('databaseServer.backup.volume')
+            ->with(['databaseServer', 'volume'])
             ->get();
 
         $totalSnapshots = 0;
@@ -306,7 +269,7 @@ class Index extends Component
         foreach ($backups as $backup) {
             try {
                 $userId = auth()->id();
-                $result = $action->execute($backup->databaseServer, is_int($userId) ? $userId : null);
+                $result = $action->execute($backup, is_int($userId) ? $userId : null);
                 $totalSnapshots += count($result['snapshots']);
             } catch (\Throwable $e) {
                 $errors[] = $backup->databaseServer->name.': '.$e->getMessage();
@@ -315,15 +278,90 @@ class Index extends Component
 
         if ($totalSnapshots > 0) {
             $this->success(
-                trans_choice(':count backup started successfully!|:count backups started successfully!', $totalSnapshots),
-                position: 'toast-bottom'
+                trans_choice(':count backup started successfully!|:count backups started successfully!', $totalSnapshots)
             );
         }
 
         if (! empty($errors)) {
-            $this->error(implode('; ', $errors), position: 'toast-bottom');
+            $this->error(implode('; ', $errors));
         }
     }
+
+    // --- Notification Channels ---
+
+    public function openChannelModal(?string $channelId = null): void
+    {
+        abort_unless(auth()->user()->isAdmin(), Response::HTTP_FORBIDDEN);
+
+        $this->channelForm->resetFields();
+        $this->editingChannelId = $channelId;
+
+        if ($channelId) {
+            $channel = NotificationChannel::findOrFail($channelId);
+            $this->channelForm->setChannel($channel);
+        }
+
+        $this->showChannelModal = true;
+    }
+
+    public function saveChannel(): void
+    {
+        abort_unless(auth()->user()->isAdmin(), Response::HTTP_FORBIDDEN);
+
+        if ($this->editingChannelId) {
+            $this->channelForm->channel = NotificationChannel::findOrFail($this->editingChannelId);
+            $this->channelForm->update();
+        } else {
+            $this->channelForm->store();
+        }
+
+        $this->showChannelModal = false;
+        $this->editingChannelId = null;
+        $this->channelForm->resetFields();
+
+        $this->success(__('Notification channel saved.'));
+    }
+
+    public function confirmDeleteChannel(string $channelId): void
+    {
+        $this->deleteChannelId = $channelId;
+        $this->showDeleteChannelModal = true;
+    }
+
+    public function deleteChannel(): void
+    {
+        abort_unless(auth()->user()->isAdmin(), Response::HTTP_FORBIDDEN);
+
+        if (! $this->deleteChannelId) {
+            return;
+        }
+
+        NotificationChannel::findOrFail($this->deleteChannelId)->delete();
+        $this->showDeleteChannelModal = false;
+        $this->deleteChannelId = null;
+
+        $this->success(__('Notification channel deleted.'));
+    }
+
+    public function sendTestNotification(string $channelId): void
+    {
+        abort_unless(auth()->user()->isAdmin(), Response::HTTP_FORBIDDEN);
+
+        $channel = NotificationChannel::findOrFail($channelId);
+
+        try {
+            app(NotificationService::class)->sendTestNotification($channel);
+
+            $this->success(__('Test notification sent to: :channel', ['channel' => $channel->name]));
+        } catch (\Throwable $e) {
+            $this->error(
+                title: __('Failed to send test notification: :message', ['message' => $e->getMessage()]),
+                timeout: 0
+            );
+        }
+    }
+
+    // --- Computed Properties ---
 
     /**
      * @return Collection<int, BackupSchedule>
@@ -345,6 +383,15 @@ class Index extends Component
     }
 
     /**
+     * @return Collection<int, NotificationChannel>
+     */
+    #[Computed]
+    public function notificationChannels(): Collection
+    {
+        return NotificationChannel::orderBy('name')->get();
+    }
+
+    /**
      * @return array<int, array{id: string, name: string}>
      */
     public function getCompressionOptions(): array
@@ -356,6 +403,17 @@ class Index extends Component
         ];
     }
 
+    /**
+     * @return array<int, array{id: string, name: string}>
+     */
+    public function getChannelTypeOptions(): array
+    {
+        return array_map(
+            fn (NotificationChannelType $type) => ['id' => $type->value, 'name' => $type->label()],
+            NotificationChannelType::cases(),
+        );
+    }
+
     private function restartScheduler(): bool
     {
         $result = Process::timeout(10)->run('supervisorctl -c /config/supervisord.conf restart schedule-run');
@@ -365,7 +423,10 @@ class Index extends Component
                 'exit_code' => $result->exitCode(),
                 'error' => $result->errorOutput(),
             ]);
-            $this->warning(__('Saved, but scheduler restart failed. Schedule changes take effect after container restart.'), position: 'toast-bottom', timeout: 6000);
+            $this->warning(
+                title: __('Saved, but scheduler restart failed. Schedule changes take effect after container restart.'),
+                timeout: 6000
+            );
 
             return false;
         }
@@ -375,23 +436,6 @@ class Index extends Component
         return true;
     }
 
-    /**
-     * @return array<int, array{id: string, name: string}>
-     */
-    public function getChannelOptions(): array
-    {
-        return [
-            ['id' => 'email', 'name' => __('Email')],
-            ['id' => 'slack', 'name' => __('Slack')],
-            ['id' => 'discord', 'name' => __('Discord (Bot)')],
-            ['id' => 'discord_webhook', 'name' => __('Discord (Webhook)')],
-            ['id' => 'telegram', 'name' => __('Telegram')],
-            ['id' => 'pushover', 'name' => __('Pushover')],
-            ['id' => 'gotify', 'name' => __('Gotify')],
-            ['id' => 'webhook', 'name' => __('Webhook')],
-        ];
-    }
-
     public function render(): View
     {
         return view('livewire.configuration.index', [
@@ -399,10 +443,10 @@ class Index extends Component
             'appConfig' => $this->getAppConfig(),
             'ssoConfig' => $this->getSsoConfig(),
             'compressionOptions' => $this->getCompressionOptions(),
-            'channelOptions' => $this->getChannelOptions(),
+            'channelTypeOptions' => $this->getChannelTypeOptions(),
             'backupSchedules' => $this->backupSchedules(),
+            'notificationChannels' => $this->notificationChannels(),
             'showDeprecatedBackupEnv' => config('app.has_deprecated_backup_env'),
-            'showDeprecatedNotificationEnv' => config('app.has_deprecated_notification_env'),
         ]);
     }
 }

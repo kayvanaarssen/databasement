@@ -81,3 +81,28 @@ test('can delete database server', function () {
         'id' => $server->id,
     ]);
 });
+
+test('runBackupAll dispatches backup jobs for all backup configs on the server', function () {
+    \Illuminate\Support\Facades\Queue::fake();
+
+    $user = User::factory()->create();
+    $server = DatabaseServer::factory()->create(['database_names' => ['mydb']]);
+
+    // Add a second backup config with its own selected database
+    \App\Models\Backup::factory()->selected(['other_db'])->for($server)->create();
+    $server->refresh();
+
+    Livewire::actingAs($user)
+        ->test(Index::class)
+        ->call('runBackupAll', $server->id);
+
+    \Illuminate\Support\Facades\Queue::assertPushed(\App\Jobs\ProcessBackupJob::class, 2);
+
+    // Each snapshot should be tied to its respective backup config
+    $snapshots = \App\Models\Snapshot::all();
+    expect($snapshots)->toHaveCount(2);
+
+    $backupIds = $server->backups->pluck('id')->sort()->values();
+    $snapshotBackupIds = $snapshots->pluck('backup_id')->sort()->values();
+    expect($snapshotBackupIds->all())->toBe($backupIds->all());
+});

@@ -3,6 +3,7 @@
 use App\Livewire\DatabaseServer\Edit;
 use App\Models\Backup;
 use App\Models\DatabaseServer;
+use App\Models\NotificationChannel;
 use App\Models\Snapshot;
 use App\Models\User;
 use App\Models\Volume;
@@ -22,18 +23,18 @@ test('can edit database server', function (array $config) {
         'database_type' => $config['type'],
     ];
 
+    $backupDatabaseNames = null;
     if ($config['type'] === 'sqlite') {
-        $serverData['database_names'] = ['/data/app.sqlite'];
+        $backupDatabaseNames = ['/data/app.sqlite'];
     } elseif ($config['type'] === 'redis') {
         $serverData['host'] = $config['host'];
         $serverData['port'] = $config['port'];
-        $serverData['database_selection_mode'] = 'all';
     } else {
         $serverData['host'] = $config['host'];
         $serverData['port'] = $config['port'];
         $serverData['username'] = 'dbuser';
         $serverData['password'] = 'secret';
-        $serverData['database_names'] = ['myapp'];
+        $backupDatabaseNames = ['myapp'];
     }
 
     $server = DatabaseServer::create($serverData);
@@ -42,6 +43,10 @@ test('can edit database server', function (array $config) {
         'volume_id' => $volume->id,
         'backup_schedule_id' => $schedule->id,
         'retention_days' => 7,
+        'database_selection_mode' => $config['type'] === 'redis'
+            ? \App\Enums\DatabaseSelectionMode::All->value
+            : \App\Enums\DatabaseSelectionMode::Selected->value,
+        'database_names' => $backupDatabaseNames,
     ]);
 
     $component = Livewire::actingAs($user)
@@ -51,11 +56,12 @@ test('can edit database server', function (array $config) {
 
     if ($config['type'] === 'sqlite') {
         $component
-            ->assertSet('form.database_names', ['/data/app.sqlite'])
+            ->assertSet('form.backups.0.database_names', ['/data/app.sqlite'])
             ->assertSet('form.host', '')
             ->assertSet('form.username', '')
             ->set('form.name', "Updated {$config['name']}")
-            ->set('form.database_names.0', '/data/new-app.sqlite');
+            ->set('form.backups.0.database_names', ['/data/new-app.sqlite'])
+            ->assertSet('form.backups.0.database_names', ['/data/new-app.sqlite']);
     } elseif ($config['type'] === 'redis') {
         $component
             ->assertSet('form.host', $config['host'])
@@ -79,10 +85,10 @@ test('can edit database server', function (array $config) {
         'name' => "Updated {$config['name']}",
     ]);
 
-    $server->refresh();
+    $server->refresh()->load('backups');
 
     if ($config['type'] === 'sqlite') {
-        expect($server->database_names)->toBe(['/data/new-app.sqlite']);
+        expect($server->backups->first()->database_names)->toBe(['/data/new-app.sqlite']);
     } else {
         expect($server->host)->toBe("{$config['type']}2.example.com");
     }
@@ -104,7 +110,6 @@ test('can change retention policy', function (array $config) {
         'port' => 3306,
         'username' => 'dbuser',
         'password' => 'secret',
-        'database_names' => ['myapp'],
     ]);
 
     // Start with forever retention (no specific retention days)
@@ -114,11 +119,13 @@ test('can change retention policy', function (array $config) {
         'backup_schedule_id' => $schedule->id,
         'retention_policy' => Backup::RETENTION_FOREVER,
         'retention_days' => null,
+        'database_selection_mode' => \App\Enums\DatabaseSelectionMode::Selected->value,
+        'database_names' => ['myapp'],
     ]);
 
     $component = Livewire::actingAs($user)
         ->test(Edit::class, ['server' => $server])
-        ->set('form.retention_policy', $config['policy']);
+        ->set('form.backups.0.retention_policy', $config['policy']);
 
     // Set policy-specific fields
     foreach ($config['form_fields'] as $field => $value) {
@@ -141,7 +148,7 @@ test('disabling backups preserves backup config when snapshots exist', function 
         'name' => 'Server With Snapshots',
         'backups_enabled' => true,
     ]);
-    $backup = $server->backup;
+    $backup = $server->backups->first();
 
     // Create a snapshot that references this backup
     Snapshot::factory()->forServer($server)->create();
@@ -158,7 +165,7 @@ test('disabling backups preserves backup config when snapshots exist', function 
     // Server should have backups disabled
     // But backup config should still exist (snapshots depend on it)
     expect($server->backups_enabled)->toBeFalse()
-        ->and($server->backup)->not->toBeNull()
+        ->and($server->backups->first())->not->toBeNull()
         ->and(Backup::find($backup->id))->not->toBeNull();
 
 });
@@ -194,13 +201,13 @@ test('can add and remove SQLite database paths', function () {
 
     Livewire::actingAs($user)
         ->test(Edit::class, ['server' => $server])
-        ->assertCount('form.database_names', 1)
-        ->call('addDatabasePath')
-        ->assertCount('form.database_names', 2)
-        ->set('form.database_names.1', '/data/other.sqlite')
-        ->call('removeDatabasePath', 0)
-        ->assertCount('form.database_names', 1)
-        ->assertSet('form.database_names.0', '/data/other.sqlite');
+        ->assertCount('form.backups.0.database_names', 1)
+        ->call('addDatabasePath', 0)
+        ->assertCount('form.backups.0.database_names', 2)
+        ->set('form.backups.0.database_names.1', '/data/other.sqlite')
+        ->call('removeDatabasePath', 0, 0)
+        ->assertCount('form.backups.0.database_names', 1)
+        ->assertSet('form.backups.0.database_names.0', '/data/other.sqlite');
 });
 
 test('refreshVolumes can be called without error', function () {
@@ -223,20 +230,151 @@ test('pattern mode filters available databases and auto-loads on switch', functi
 
     // Switching to pattern triggers updatedDatabaseSelectionMode auto-load hook
     $component->assertSet('form.availableDatabases', [])
-        ->set('form.database_selection_mode', 'pattern')
+        ->set('form.backups.0.database_selection_mode', 'pattern')
         ->assertSet('form.loadingDatabases', false);
 
     // Empty pattern returns nothing
-    $component->set('form.database_include_pattern', '');
-    expect($component->instance()->form->getFilteredDatabases())->toBe([]);
+    $component->set('form.backups.0.database_include_pattern', '');
+    expect($component->instance()->form->getFilteredDatabases(''))->toBe([]);
 
     // With databases loaded, pattern filters correctly
     $component->set('form.availableDatabases', [
         ['id' => 'prod_users', 'name' => 'prod_users'],
         ['id' => 'prod_orders', 'name' => 'prod_orders'],
         ['id' => 'staging_users', 'name' => 'staging_users'],
-    ])->set('form.database_include_pattern', '^prod_');
+    ])->set('form.backups.0.database_include_pattern', '^prod_');
 
-    expect($component->instance()->form->getFilteredDatabases())
+    expect($component->instance()->form->getFilteredDatabases('^prod_'))
         ->toBe(['prod_users', 'prod_orders']);
+});
+
+test('admin can select notification channels for a database server', function () {
+    $admin = User::factory()->create(['role' => 'admin']);
+
+    $email = NotificationChannel::factory()->email()->create(['name' => 'Zebra Alerts']);
+    $slack = NotificationChannel::factory()->slack()->create(['name' => 'Alpha Slack']);
+    NotificationChannel::factory()->discord()->create(['name' => 'Mid Discord']);
+
+    $server = DatabaseServer::factory()->create(['name' => 'Prod DB', 'database_names' => ['myapp']]);
+
+    $component = Livewire::actingAs($admin)
+        ->test(Edit::class, ['server' => $server])
+        ->set('form.notification_channel_selection', 'selected');
+
+    // Verify the form exposes the channels ordered by name
+    $channels = $component->instance()->form->getNotificationChannels();
+    expect($channels->pluck('name')->toArray())->toBe([
+        'Alpha Slack',
+        'Mid Discord',
+        'Zebra Alerts',
+    ]);
+
+    // Select two channels and save
+    $component
+        ->set('form.notification_channel_ids', [$email->id, $slack->id])
+        ->call('save')
+        ->assertHasNoErrors();
+
+    // Verify the pivot table was synced
+    $synced = $server->fresh()->notificationChannels()->pluck('notification_channels.id')->sort()->values()->toArray();
+    expect($synced)->toBe(collect([$email->id, $slack->id])->sort()->values()->toArray());
+});
+
+test('selected notification channel selection requires at least one channel', function (string $trigger) {
+    $admin = User::factory()->create(['role' => 'admin']);
+    NotificationChannel::factory()->email()->create();
+    $server = DatabaseServer::factory()->create(['database_names' => ['myapp']]);
+
+    Livewire::actingAs($admin)
+        ->test(Edit::class, ['server' => $server])
+        ->set('form.notification_trigger', $trigger)
+        ->set('form.notification_channel_selection', 'selected')
+        ->set('form.notification_channel_ids', [])
+        ->call('save')
+        ->assertHasErrors('form.notification_channel_ids');
+})->with([
+    'all events' => 'all',
+    'success only' => 'success',
+    'failure only' => 'failure',
+]);
+
+test('notification channel selection is not required when trigger is disabled', function () {
+    $admin = User::factory()->create(['role' => 'admin']);
+    NotificationChannel::factory()->email()->create();
+    $server = DatabaseServer::factory()->create(['database_names' => ['myapp']]);
+
+    // Previously: switching to "selected" then to "none" (disabled) left an
+    // invisible `notification_channel_ids` required error that blocked saving.
+    Livewire::actingAs($admin)
+        ->test(Edit::class, ['server' => $server])
+        ->set('form.notification_channel_selection', 'selected')
+        ->set('form.notification_channel_ids', [])
+        ->set('form.notification_trigger', 'none')
+        ->call('save')
+        ->assertHasNoErrors('form.notification_channel_ids')
+        ->assertRedirect(route('database-servers.index'));
+});
+
+test('edit hydrates multiple backup configurations', function () {
+    $user = User::factory()->create();
+    $server = DatabaseServer::factory()->withBackups(2)->create();
+
+    expect($server->backups()->count())->toBe(2);
+
+    $component = Livewire::actingAs($user)
+        ->test(Edit::class, ['server' => $server])
+        ->assertCount('form.backups', 2);
+
+    $state = $component->get('form')->backups;
+    expect($state[0]['id'])->toBe($server->backups[0]->id)
+        ->and($state[1]['id'])->toBe($server->backups[1]->id);
+});
+
+test('save creates a second backup row when a card is added', function () {
+    $user = User::factory()->create();
+    $volume = Volume::factory()->local()->create();
+    $schedule = dailySchedule();
+    $server = DatabaseServer::factory()->create();
+
+    Livewire::actingAs($user)
+        ->test(Edit::class, ['server' => $server])
+        ->call('addBackup')
+        ->assertCount('form.backups', 2)
+        ->set('form.backups.1.volume_id', $volume->id)
+        ->set('form.backups.1.backup_schedule_id', $schedule->id)
+        ->set('form.backups.1.retention_policy', 'days')
+        ->set('form.backups.1.retention_days', 30)
+        ->set('form.backups.1.database_selection_mode', 'all')
+        ->call('save')
+        ->assertHasNoErrors()
+        ->assertRedirect(route('database-servers.index'));
+
+    $server->refresh()->load('backups');
+    expect($server->backups()->count())->toBe(2);
+});
+
+test('removing a backup card orphans existing snapshots without deleting them', function () {
+    $user = User::factory()->create();
+    $server = DatabaseServer::factory()->withBackups(2)->create();
+    $server->load('backups');
+    $toRemove = $server->backups[1];
+
+    // Create a snapshot referencing the backup we're about to remove
+    $snapshot = Snapshot::factory()->forServer($server)->create([
+        'backup_id' => $toRemove->id,
+    ]);
+
+    Livewire::actingAs($user)
+        ->test(Edit::class, ['server' => $server])
+        ->assertCount('form.backups', 2)
+        ->call('removeBackup', 1)
+        ->assertCount('form.backups', 1)
+        ->call('save')
+        ->assertHasNoErrors()
+        ->assertRedirect(route('database-servers.index'));
+
+    // Backup row is gone, snapshot is retained with null backup_id
+    expect(Backup::find($toRemove->id))->toBeNull()
+        ->and(Snapshot::find($snapshot->id))->not->toBeNull()
+        ->and(Snapshot::find($snapshot->id)->backup_id)->toBeNull();
 });

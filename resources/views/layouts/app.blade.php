@@ -79,27 +79,12 @@
             <x-alert :title="__('You\'re in demo mode. Some data modifications are disabled.')" class="alert-warning mb-4" icon="o-eye" />
         @endif
 
-        @if (session('status'))
-            <x-alert class="alert-success mb-4" icon="o-check-circle" dismissible>
-                {{ session('status') }}
-            </x-alert>
-        @endif
-
-        @if (session('demo_notice'))
-            <x-alert class="alert-warning mb-4" icon="o-exclamation-triangle" dismissible>
-                {{ session('demo_notice') }}
-            </x-alert>
-        @endif
-
         {{ $slot }}
 
         {{-- FOOTER --}}
         @php
-            $versionLabel = \App\Support\GitInfo::getVersionLabel();
-            $commitUrl = \App\Support\GitInfo::getCommitUrl();
-            $githubRepo = \App\Support\GitInfo::getGitHubRepo();
-            $githubRepoShort = \App\Support\GitInfo::getGitHubRepoShort();
-            $newIssueUrl = \App\Support\GitInfo::getNewIssueUrl();
+            $githubRepo = config('app.github_repo');
+            $githubRepoShort = trim(str_replace('https://', '', $githubRepo), '/');
         @endphp
         <footer class="mt-12 py-6 border-t border-base-300">
             <div class="flex flex-col items-center gap-4 text-sm text-base-content/60">
@@ -110,7 +95,7 @@
                         <a href="https://crty.dev" target="_blank" rel="noopener" class="link link-hover">David-Crty</a>
                     </span>
                     <a href="{{ $githubRepo }}" target="_blank" rel="noopener" class="link link-hover flex items-center gap-1">
-                        <x-fab-github class="w-4 h-4" />
+                        <x-bi-github class="w-4 h-4" />
                         {{ $githubRepoShort }}
                     </a>
                 </div>
@@ -119,17 +104,15 @@
                     <a href="https://david-crty.github.io/databasement/" target="_blank" rel="noopener" class="link link-hover">
                         Documentation
                     </a>
-                    <a href="{{ $newIssueUrl }}" target="_blank" rel="noopener" class="link link-hover">
+                    <a href="{{ $githubRepo }}/issues/new" target="_blank" rel="noopener" class="link link-hover">
                         Report an issue
                     </a>
                     <a href="{{ $githubRepo }}/blob/main/LICENSE" target="_blank" rel="noopener" class="link link-hover">
                         MIT License
                     </a>
-                    @if($versionLabel)
-                        <a href="{{ $commitUrl }}" target="_blank" rel="noopener" class="link link-hover font-mono text-xs">
-                            {{ $versionLabel }}
-                        </a>
-                    @endif
+                    @persist('version-status')
+                        <livewire:version-status />
+                    @endpersist
                 </div>
             </div>
         </footer>

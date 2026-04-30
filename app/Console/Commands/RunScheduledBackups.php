@@ -29,7 +29,7 @@ class RunScheduledBackups extends Command
             return self::FAILURE;
         }
 
-        $backups = Backup::with(['databaseServer', 'volume'])
+        $backups = Backup::with(['databaseServer', 'volume', 'backupSchedule'])
             ->whereRelation('databaseServer', 'backups_enabled', true)
             ->where('backup_schedule_id', $schedule->id)
             ->get();
@@ -49,7 +49,7 @@ class RunScheduledBackups extends Command
                 $this->dispatch($backup, $backupJobFactory, $payloadBuilder);
             } catch (\Throwable $e) {
                 $failedCount++;
-                Log::error("Failed to dispatch backup job for server [{$backup->databaseServer->name}]", [
+                Log::error("Failed to dispatch backup job for server [{$backup->databaseServer->name} / {$backup->getDisplayLabel()}]", [
                     'error' => $e->getMessage(),
                 ]);
             }
@@ -69,7 +69,7 @@ class RunScheduledBackups extends Command
         $server = $backup->databaseServer;
 
         $snapshots = $backupJobFactory->createSnapshots(
-            server: $server,
+            backup: $backup,
             method: 'scheduled',
         );
 
@@ -80,10 +80,11 @@ class RunScheduledBackups extends Command
                 ->where('database_server_id', $server->id)
                 ->where('type', AgentJob::TYPE_DISCOVER)
                 ->whereIn('status', [AgentJob::STATUS_PENDING, AgentJob::STATUS_CLAIMED, AgentJob::STATUS_RUNNING])
-                ->exists();
+                ->get()
+                ->contains(fn (AgentJob $job) => ($job->payload['backup_id'] ?? null) === $backup->id);
 
             if ($hasInflightDiscovery) {
-                $this->line("  → Skipped discovery for: {$server->name} (already in-flight)");
+                $this->line("  → Skipped discovery for: {$server->name} [{$backup->getDisplayLabel()}] (already in-flight)");
 
                 return;
             }
@@ -93,10 +94,10 @@ class RunScheduledBackups extends Command
                 'database_server_id' => $server->id,
                 'snapshot_id' => null,
                 'status' => AgentJob::STATUS_PENDING,
-                'payload' => $payloadBuilder->buildDiscovery($server, 'scheduled', null),
+                'payload' => $payloadBuilder->buildDiscovery($backup, 'scheduled', null),
             ]);
 
-            $this->line("  → Dispatched discovery for: {$server->name} via agent");
+            $this->line("  → Dispatched discovery for: {$server->name} [{$backup->getDisplayLabel()}] via agent");
 
             return;
         }
@@ -118,6 +119,6 @@ class RunScheduledBackups extends Command
         $count = count($snapshots);
         $via = $server->agent_id ? 'agent' : 'queue';
         $dbInfo = $count === 1 ? '1 database' : "{$count} databases";
-        $this->line("  → Dispatched backup for: {$server->name} ({$dbInfo}) via {$via}");
+        $this->line("  → Dispatched backup for: {$server->name} [{$backup->getDisplayLabel()}] ({$dbInfo}) via {$via}");
     }
 }

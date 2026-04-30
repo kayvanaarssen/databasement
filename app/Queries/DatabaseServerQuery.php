@@ -17,20 +17,20 @@ class DatabaseServerQuery
     public static function make(): QueryBuilder
     {
         return QueryBuilder::for(DatabaseServer::class)
-            ->with(['backup.volume', 'backup.backupSchedule', 'sshConfig'])
-            ->allowedFilters([
+            ->with(['backups.volume', 'backups.backupSchedule', 'sshConfig', 'notificationChannels'])
+            ->allowedFilters(
                 AllowedFilter::partial('name'),
                 AllowedFilter::partial('host'),
                 AllowedFilter::exact('database_type'),
                 AllowedFilter::partial('description'),
                 AllowedFilter::exact('managed_by'),
-            ])
-            ->allowedSorts([
+            )
+            ->allowedSorts(
                 AllowedSort::field('name'),
                 AllowedSort::field('host'),
                 AllowedSort::field('database_type'),
                 AllowedSort::field('created_at'),
-            ])
+            )
             ->defaultSort('-created_at');
     }
 
@@ -45,7 +45,7 @@ class DatabaseServerQuery
         string $sortDirection = 'desc'
     ): Builder {
         return DatabaseServer::query()
-            ->with(['backup.volume', 'backup.backupSchedule', 'sshConfig'])
+            ->with(['backups.volume', 'backups.backupSchedule', 'sshConfig', 'notificationChannels'])
             ->withCount('snapshots')
             ->addSelect([
                 'restores_count' => Restore::selectRaw('count(*)')

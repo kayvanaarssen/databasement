@@ -2,18 +2,20 @@
 
 namespace App\Livewire\Forms;
 
-use App\Enums\DatabaseSelectionMode;
 use App\Enums\DatabaseType;
+use App\Enums\NotificationChannelSelection;
+use App\Enums\NotificationTrigger;
 use App\Exceptions\Backup\EncryptionException;
 use App\Models\Agent;
 use App\Models\Backup;
 use App\Models\BackupSchedule;
 use App\Models\DatabaseServer;
 use App\Models\DatabaseServerSshConfig;
-use App\Rules\SafePath;
+use App\Models\NotificationChannel;
 use App\Services\Backup\Databases\DatabaseProvider;
+use App\Services\Backup\SyncBackupConfigurationsAction;
 use App\Services\SshTunnelService;
-use App\Support\Formatters;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Livewire\Form;
@@ -67,16 +69,6 @@ class DatabaseServerForm extends Form
 
     public bool $testingSshConnection = false;
 
-    /** @var array<string> */
-    public array $database_names = [];
-
-    /** @var string Input field for manual database entry (comma-separated) */
-    public string $database_names_input = '';
-
-    public string $database_selection_mode = 'all';
-
-    public string $database_include_pattern = '';
-
     public ?string $description = null;
 
     public bool $use_agent = false;
@@ -85,21 +77,21 @@ class DatabaseServerForm extends Form
 
     public bool $backups_enabled = true;
 
-    public string $volume_id = '';
+    // Notification preferences (server-level)
+    public string $notification_trigger = 'failure';
 
-    public string $path = '';
+    public string $notification_channel_selection = 'all';
 
-    public string $backup_schedule_id = '';
+    /** @var array<string> */
+    public array $notification_channel_ids = [];
 
-    public ?int $retention_days = 14;
-
-    public string $retention_policy = Backup::RETENTION_DAYS;
-
-    public ?int $gfs_keep_daily = 7;
-
-    public ?int $gfs_keep_weekly = 4;
-
-    public ?int $gfs_keep_monthly = 12;
+    /**
+     * Collection of backup configurations attached to this server. Each
+     * entry follows the shape returned by {@see BackupForm::defaults()}.
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    public array $backups = [];
 
     public ?string $connectionTestMessage = null;
 
@@ -118,24 +110,78 @@ class DatabaseServerForm extends Form
     public bool $loadingDatabases = false;
 
     /**
-     * Called when retention_policy changes - set default values if switching
-     * to a policy and its values are empty.
+     * Generic updated hook — used to reactively respond to changes in nested
+     * array properties (e.g. `backups.0.database_selection_mode`) that magic
+     * `updatedXxx` methods can't reach.
      */
-    public function updatedRetentionPolicy(string $value): void
+    public function updated(string $property, mixed $value): void
     {
-        if ($value === Backup::RETENTION_DAYS && empty($this->retention_days)) {
-            $this->retention_days = 14;
+        if (preg_match('/^backups\.(\d+)\.retention_policy$/', $property, $matches)) {
+            $this->onBackupRetentionPolicyChanged((int) $matches[1], (string) $value);
+
+            return;
+        }
+
+        if (preg_match('/^backups\.(\d+)\.database_selection_mode$/', $property)) {
+            $this->onBackupSelectionModeChanged();
+
+            return;
+        }
+
+        // Clearing the comma-separated text input should clear the backing
+        // array so stale values can't survive the save. Live-binding means
+        // this fires while typing, so we only act on a full clear.
+        if (preg_match('/^backups\.(\d+)\.database_names_input$/', $property, $matches)
+            && (string) $value === ''
+        ) {
+            $index = (int) $matches[1];
+            if (isset($this->backups[$index])) {
+                $this->backups[$index]['database_names'] = [];
+            }
+        }
+    }
+
+    /**
+     * When a backup's retention policy changes, restore sensible defaults for
+     * the freshly-activated tier if the user previously zeroed them out.
+     */
+    private function onBackupRetentionPolicyChanged(int $index, string $value): void
+    {
+        if (! isset($this->backups[$index])) {
+            return;
+        }
+
+        if ($value === Backup::RETENTION_DAYS && empty($this->backups[$index]['retention_days'])) {
+            $this->backups[$index]['retention_days'] = 14;
         }
 
         if ($value === Backup::RETENTION_GFS
-            && empty($this->gfs_keep_daily)
-            && empty($this->gfs_keep_weekly)
-            && empty($this->gfs_keep_monthly)
+            && empty($this->backups[$index]['gfs_keep_daily'])
+            && empty($this->backups[$index]['gfs_keep_weekly'])
+            && empty($this->backups[$index]['gfs_keep_monthly'])
         ) {
-            $this->gfs_keep_daily = 7;
-            $this->gfs_keep_weekly = 4;
-            $this->gfs_keep_monthly = 12;
+            $this->backups[$index]['gfs_keep_daily'] = 7;
+            $this->backups[$index]['gfs_keep_weekly'] = 4;
+            $this->backups[$index]['gfs_keep_monthly'] = 12;
         }
+    }
+
+    /**
+     * When any backup's selection mode changes, auto-load the server's
+     * available database list (if we're editing a persisted server and the
+     * list hasn't been loaded yet).
+     */
+    private function onBackupSelectionModeChanged(): void
+    {
+        if (! empty($this->availableDatabases)) {
+            return;
+        }
+
+        if ($this->server === null || $this->isSqlite() || $this->isRedis()) {
+            return;
+        }
+
+        $this->loadAvailableDatabases();
     }
 
     /**
@@ -161,9 +207,13 @@ class DatabaseServerForm extends Form
         $this->resetConnectionTestState();
         $this->availableDatabases = [];
 
-        // Ensure SQLite always has at least one path row
-        if ($value === 'sqlite' && empty($this->database_names)) {
-            $this->database_names = [''];
+        // Ensure SQLite always has at least one path row on the first backup
+        if ($value === 'sqlite') {
+            foreach ($this->backups as $index => $backup) {
+                if (empty($this->backups[$index]['database_names'])) {
+                    $this->backups[$index]['database_names'] = [''];
+                }
+            }
         }
 
         // Pre-fill auth_source for MongoDB
@@ -173,35 +223,19 @@ class DatabaseServerForm extends Form
     }
 
     /**
-     * Called when database_selection_mode changes - auto-load databases if needed.
-     */
-    public function updatedDatabaseSelectionMode(): void
-    {
-        // Auto-load databases when switching to selected/pattern mode in edit
-        if (in_array($this->database_selection_mode, [DatabaseSelectionMode::Selected->value, DatabaseSelectionMode::Pattern->value])
-            && empty($this->availableDatabases)
-            && $this->server !== null
-            && ! $this->isSqlite()
-            && ! $this->isRedis()
-        ) {
-            $this->loadAvailableDatabases();
-        }
-    }
-
-    /**
-     * Get databases matching the current pattern from available databases.
+     * Filter `$availableDatabases` against a regex pattern for pattern-preview UI.
      *
      * @return array<string>
      */
-    public function getFilteredDatabases(): array
+    public function getFilteredDatabases(string $pattern): array
     {
-        if ($this->database_include_pattern === '' || empty($this->availableDatabases)) {
+        if ($pattern === '' || empty($this->availableDatabases)) {
             return [];
         }
 
         $databaseNames = array_column($this->availableDatabases, 'name');
 
-        return DatabaseServer::filterDatabasesByPattern($databaseNames, $this->database_include_pattern);
+        return DatabaseServer::filterDatabasesByPattern($databaseNames, $pattern);
     }
 
     /**
@@ -213,12 +247,16 @@ class DatabaseServerForm extends Form
             $this->agent_id = null;
         }
 
-        // Clear volume selection if the current volume is local (incompatible with agents)
-        if ($this->use_agent
-            && $this->volume_id
-            && \App\Models\Volume::whereKey($this->volume_id)->where('type', \App\Enums\VolumeType::LOCAL->value)->exists()
-        ) {
-            $this->volume_id = '';
+        // Clear volume selection(s) if they were local (incompatible with agents)
+        if ($this->use_agent) {
+            foreach ($this->backups as $index => $backup) {
+                $volumeId = $backup['volume_id'] ?? '';
+                if ($volumeId !== ''
+                    && \App\Models\Volume::whereKey($volumeId)->where('type', \App\Enums\VolumeType::LOCAL->value)->exists()
+                ) {
+                    $this->backups[$index]['volume_id'] = '';
+                }
+            }
         }
 
         $this->resetConnectionTestState();
@@ -343,17 +381,13 @@ class DatabaseServerForm extends Form
         $this->auth_source = $server->getExtraConfig('auth_source', '');
         $this->dump_flags = $server->getExtraConfig('dump_flags', '');
         $this->username = $server->username ?? '';
-        $this->database_names = $server->database_names ?? [];
-        if ($server->database_type === DatabaseType::SQLITE && empty($this->database_names)) {
-            $this->database_names = [''];
-        }
-        $this->database_names_input = implode(', ', $this->database_names);
-        $this->database_selection_mode = ($server->database_selection_mode ?? DatabaseSelectionMode::All)->value;
-        $this->database_include_pattern = $server->database_include_pattern ?? '';
         $this->description = $server->description;
         $this->agent_id = $server->agent_id;
         $this->use_agent = ! empty($server->agent_id);
         $this->backups_enabled = $server->backups_enabled ?? true;
+        $this->notification_trigger = $server->notification_trigger?->value ?? 'failure'; // @phpstan-ignore nullCoalesce.expr
+        $this->notification_channel_selection = $server->notification_channel_selection?->value ?? 'all'; // @phpstan-ignore nullCoalesce.expr
+        $this->notification_channel_ids = $server->notificationChannels()->pluck('notification_channels.id')->toArray();
         // Don't populate password for security
         $this->password = '';
 
@@ -369,19 +403,45 @@ class DatabaseServerForm extends Form
             $this->ssh_config_id = null;
         }
 
-        // Load backup data if exists
-        if ($server->backup) {
-            /** @var Backup $backup */
-            $backup = $server->backup;
-            $this->volume_id = $backup->volume_id;
-            $this->path = $backup->path ?? '';
-            $this->backup_schedule_id = $backup->backup_schedule_id ?? '';
-            $this->retention_days = $backup->retention_days;
-            $this->retention_policy = $backup->retention_policy ?? Backup::RETENTION_DAYS;
-            $this->gfs_keep_daily = $backup->gfs_keep_daily;
-            $this->gfs_keep_weekly = $backup->gfs_keep_weekly;
-            $this->gfs_keep_monthly = $backup->gfs_keep_monthly;
+        // Load backup configurations
+        $backups = $server->backups()->get();
+
+        if ($backups->isEmpty()) {
+            $this->backups = [BackupForm::defaults()];
+            if ($server->database_type === DatabaseType::SQLITE) {
+                $this->backups[0]['database_names'] = [''];
+            }
+        } else {
+            $this->backups = $backups->map(fn (Backup $backup) => BackupForm::fromModel($backup))->all();
         }
+    }
+
+    /**
+     * Add an empty backup config card to the collection.
+     */
+    public function addBackup(?string $defaultScheduleId = null): void
+    {
+        if ($defaultScheduleId === null) {
+            $defaultScheduleId = BackupSchedule::where('name', 'Daily')->value('id');
+        }
+
+        $this->backups[] = BackupForm::defaults($defaultScheduleId);
+    }
+
+    /**
+     * Remove the backup config card at the given index.
+     *
+     * Intentionally does NOT reindex the array: stable keys keep Livewire /
+     * Alpine children (e.g. x-choices-offline) bound to their original
+     * `form.backups.{index}.*` paths across re-renders.
+     */
+    public function removeBackup(int $index): void
+    {
+        if (count($this->backups) <= 1) {
+            return;
+        }
+
+        unset($this->backups[$index]);
     }
 
     /**
@@ -401,45 +461,72 @@ class DatabaseServerForm extends Form
     }
 
     /**
-     * Normalize database_names from either multiselect or comma-separated input
+     * Normalize SQLite database_names across all backup cards (strip empty entries).
      */
     public function normalizeDatabaseNames(): void
     {
-        // SQLite uses array inputs directly
-        if ($this->isSqlite()) {
-            $this->database_names = array_values(array_filter(
-                array_map('trim', $this->database_names)
-            ));
-
+        if (! $this->isSqlite()) {
             return;
         }
 
-        // If multiselect is used (availableDatabases is populated), use database_names directly
-        if (! empty($this->availableDatabases)) {
-            return;
-        }
-
-        // Otherwise, parse from comma-separated input
-        if (! empty($this->database_names_input)) {
-            $this->database_names = array_values(array_filter(
-                array_map('trim', explode(',', $this->database_names_input))
+        foreach ($this->backups as $index => $backup) {
+            $names = $backup['database_names'] ?? [];
+            $this->backups[$index]['database_names'] = array_values(array_filter(
+                array_map('trim', $names),
             ));
         }
     }
 
-    public function addDatabasePath(): void
+    /**
+     * Flatten, de-duplicate and return every SQLite file path across the
+     * backup cards. Used for connection testing so any populated backup can
+     * exercise the connection — not only the first one.
+     *
+     * @return array<int, string>
+     */
+    private function collectSqlitePaths(): array
     {
-        $this->database_names[] = '';
+        $paths = [];
+
+        foreach ($this->backups as $backup) {
+            foreach ($backup['database_names'] ?? [] as $path) {
+                if (is_string($path) && trim($path) !== '') {
+                    $paths[] = trim($path);
+                }
+            }
+        }
+
+        return array_values(array_unique($paths));
     }
 
-    public function removeDatabasePath(int $index): void
+    /**
+     * Add an empty SQLite file path row to the given backup card.
+     */
+    public function addDatabasePath(int $backupIndex): void
     {
-        if (count($this->database_names) <= 1) {
+        if (! isset($this->backups[$backupIndex])) {
             return;
         }
 
-        unset($this->database_names[$index]);
-        $this->database_names = array_values($this->database_names);
+        $this->backups[$backupIndex]['database_names'][] = '';
+    }
+
+    /**
+     * Remove one SQLite file path row from the given backup card.
+     */
+    public function removeDatabasePath(int $backupIndex, int $pathIndex): void
+    {
+        if (! isset($this->backups[$backupIndex]['database_names'])) {
+            return;
+        }
+
+        $paths = $this->backups[$backupIndex]['database_names'];
+        if (count($paths) <= 1) {
+            return;
+        }
+
+        unset($paths[$pathIndex]);
+        $this->backups[$backupIndex]['database_names'] = array_values($paths);
     }
 
     /**
@@ -526,17 +613,26 @@ class DatabaseServerForm extends Form
     }
 
     /**
+     * Load the full BackupSchedule collection (used by blade for display helpers).
+     *
+     * @return \Illuminate\Support\Collection<int, BackupSchedule>
+     */
+    public function getBackupSchedules(): \Illuminate\Support\Collection
+    {
+        return BackupSchedule::orderBy('name')->get();
+    }
+
+    /**
      * Get backup schedule options for select
      *
      * @return array<array{id: string, name: string}>
      */
     public function getScheduleOptions(): array
     {
-        return BackupSchedule::orderBy('name')
-            ->get()
+        return $this->getBackupSchedules()
             ->map(fn (BackupSchedule $schedule) => [
                 'id' => $schedule->id,
-                'name' => $schedule->name.' — '.$schedule->expression.' ('.Formatters::cronTranslation($schedule->expression).')',
+                'name' => $schedule->name.' — '.$schedule->expression.' ('.\App\Support\Formatters::cronTranslation($schedule->expression).')',
             ])
             ->toArray();
     }
@@ -583,13 +679,23 @@ class DatabaseServerForm extends Form
     }
 
     /**
+     * Load the full Volume collection (used by blade for display helpers).
+     *
+     * @return \Illuminate\Support\Collection<int, \App\Models\Volume>
+     */
+    public function getAllVolumes(): \Illuminate\Support\Collection
+    {
+        return \App\Models\Volume::orderBy('name')->get();
+    }
+
+    /**
      * Get volume options for select
      *
      * @return array<array{id: string, name: string, disabled: bool}>
      */
     public function getVolumeOptions(): array
     {
-        return \App\Models\Volume::orderBy('name')->get()->map(function ($v) {
+        return $this->getAllVolumes()->map(function ($v) {
             $isLocalWithAgent = $this->use_agent && $v->getVolumeType() === \App\Enums\VolumeType::LOCAL;
 
             return [
@@ -609,10 +715,26 @@ class DatabaseServerForm extends Form
     {
         $this->normalizeDatabaseNames();
 
+        $serverType = DatabaseType::tryFrom($this->database_type);
+
+        if ($this->backups_enabled && $serverType !== null) {
+            foreach ($this->backups as $index => $entry) {
+                BackupForm::normalizeDatabaseNames($this->backups[$index], $this->availableDatabases, $serverType);
+                BackupForm::normalizeSelection($this->backups[$index], $serverType);
+            }
+        }
+
         $rules = $this->getBaseValidationRules();
 
-        if ($this->backups_enabled) {
-            $rules = array_merge($rules, $this->getBackupValidationRules());
+        if ($this->backups_enabled && $serverType !== null) {
+            $rules['backups'] = 'required|array|min:1';
+
+            foreach ($this->backups as $index => $entry) {
+                $rules = array_merge(
+                    $rules,
+                    BackupForm::rulesFor($index, $entry, $serverType, $this->hasAgent()),
+                );
+            }
         }
 
         if ($this->isSqlite()) {
@@ -627,8 +749,12 @@ class DatabaseServerForm extends Form
 
         $validated = $this->validate($rules);
 
-        $this->validatePatternMode();
-        $this->validateGfsPolicy();
+        if ($this->backups_enabled) {
+            foreach ($this->backups as $index => $entry) {
+                BackupForm::validatePatternMode($index, $entry);
+                BackupForm::validateGfsPolicy($index, $entry);
+            }
+        }
 
         return $validated;
     }
@@ -650,52 +776,13 @@ class DatabaseServerForm extends Form
             'agent_id' => 'nullable|exists:agents,id',
             'backups_enabled' => 'boolean',
             'dump_flags' => ['nullable', 'string', 'max:500', 'regex:/^[a-zA-Z0-9\s\-\_\=\.\/\,\:\*\?\%\+\@]+$/'],
-        ];
-    }
-
-    /**
-     * Get backup configuration validation rules.
-     *
-     * @return array<string, mixed>
-     */
-    private function getBackupValidationRules(): array
-    {
-        $rules = [
-            'volume_id' => [
-                'required',
-                'exists:volumes,id',
-                function (string $attribute, mixed $value, \Closure $fail): void {
-                    if ($this->use_agent
-                        && \App\Models\Volume::whereKey($value)->where('type', \App\Enums\VolumeType::LOCAL->value)->exists()
-                    ) {
-                        $fail(__('Local volumes cannot be used with remote agents.'));
-                    }
-                },
-            ],
-            'path' => ['nullable', 'string', 'max:255', new SafePath],
-            'backup_schedule_id' => 'required|exists:backup_schedules,id',
-            'retention_policy' => 'required|string|in:'.implode(',', Backup::RETENTION_POLICIES),
-        ];
-
-        if ($this->retention_policy === Backup::RETENTION_DAYS) {
-            $rules['retention_days'] = 'required|integer|min:1|max:365';
-        } elseif ($this->retention_policy === Backup::RETENTION_GFS) {
-            $rules['gfs_keep_daily'] = 'nullable|integer|min:0|max:90';
-            $rules['gfs_keep_weekly'] = 'nullable|integer|min:0|max:52';
-            $rules['gfs_keep_monthly'] = 'nullable|integer|min:0|max:24';
-        }
-
-        return $rules;
-    }
-
-    /**
-     * @return array<string, string>
-     */
-    private function getSqlitePathRules(): array
-    {
-        return [
-            'database_names' => 'required|array|min:1',
-            'database_names.*' => 'required|string|max:1000',
+            'notification_trigger' => ['required', 'string', Rule::in(array_column(NotificationTrigger::cases(), 'value'))],
+            'notification_channel_selection' => ['required', 'string', Rule::in(array_column(NotificationChannelSelection::cases(), 'value'))],
+            'notification_channel_ids' => ['array', Rule::requiredIf(
+                $this->notification_trigger !== NotificationTrigger::None->value
+                && $this->notification_channel_selection === NotificationChannelSelection::Selected->value
+            )],
+            'notification_channel_ids.*' => ['string', 'exists:notification_channels,id'],
         ];
     }
 
@@ -704,9 +791,9 @@ class DatabaseServerForm extends Form
      */
     private function getSqliteValidationRules(): array
     {
-        $rules = array_merge($this->getSqlitePathRules(), [
+        $rules = [
             'ssh_enabled' => 'boolean',
-        ]);
+        ];
 
         if ($this->ssh_enabled) {
             $rules['ssh_config_mode'] = 'required|string|in:existing,create';
@@ -723,13 +810,13 @@ class DatabaseServerForm extends Form
      */
     private function getClientServerValidationRules(): array
     {
-        $rules = array_merge([
+        $rules = [
             'host' => 'required|string|max:255',
             'port' => 'required|integer|min:1|max:65535',
             'username' => 'required|string|max:255',
             'password' => 'nullable',
             'ssh_enabled' => 'boolean',
-        ], $this->getDatabaseSelectionRules());
+        ];
 
         if ($this->ssh_enabled) {
             $rules['ssh_config_mode'] = 'required|string|in:existing,create';
@@ -769,14 +856,14 @@ class DatabaseServerForm extends Form
      */
     private function getMongodbValidationRules(): array
     {
-        $rules = array_merge([
+        $rules = [
             'host' => 'required|string|max:255',
             'port' => 'required|integer|min:1|max:65535',
             'username' => 'nullable|string|max:255',
             'password' => 'nullable',
             'auth_source' => 'nullable|string|max:255',
             'ssh_enabled' => 'boolean',
-        ], $this->getDatabaseSelectionRules());
+        ];
 
         if ($this->ssh_enabled) {
             $rules['ssh_config_mode'] = 'required|string|in:existing,create';
@@ -786,79 +873,19 @@ class DatabaseServerForm extends Form
         return $rules;
     }
 
-    /**
-     * Get database selection validation rules shared by client-server and MongoDB types.
-     *
-     * @return array<string, mixed>
-     */
-    private function getDatabaseSelectionRules(): array
-    {
-        $rules = [
-            'database_selection_mode' => ['required', 'string', Rule::in(array_map(fn (DatabaseSelectionMode $m) => $m->value, DatabaseSelectionMode::cases()))],
-            'database_names' => 'nullable|array',
-            'database_names.*' => 'string|max:255',
-            'database_include_pattern' => 'nullable|string|max:500',
-        ];
-
-        if ($this->backups_enabled && $this->database_selection_mode === DatabaseSelectionMode::Selected->value) {
-            $rules['database_names'] = 'required|array|min:1';
-        }
-
-        if ($this->backups_enabled && $this->database_selection_mode === DatabaseSelectionMode::Pattern->value) {
-            $rules['database_include_pattern'] = 'required|string|max:500';
-        }
-
-        return $rules;
-    }
-
-    /**
-     * Validate pattern mode has a valid regex.
-     *
-     * @throws ValidationException
-     */
-    private function validatePatternMode(): void
-    {
-        if ($this->database_selection_mode === DatabaseSelectionMode::Pattern->value
-            && ! empty($this->database_include_pattern)
-            && ! DatabaseServer::isValidDatabasePattern($this->database_include_pattern)
-        ) {
-            throw ValidationException::withMessages([
-                'form.database_include_pattern' => __('The pattern is not a valid regular expression.'),
-            ]);
-        }
-    }
-
-    /**
-     * Validate GFS retention policy has at least one tier configured.
-     *
-     * @throws ValidationException
-     */
-    private function validateGfsPolicy(): void
-    {
-        if ($this->backups_enabled
-            && $this->retention_policy === Backup::RETENTION_GFS
-            && empty($this->gfs_keep_daily)
-            && empty($this->gfs_keep_weekly)
-            && empty($this->gfs_keep_monthly)
-        ) {
-            throw ValidationException::withMessages([
-                'form.gfs_keep_daily' => __('At least one retention tier must be configured.'),
-            ]);
-        }
-    }
-
     public function store(): bool
     {
         $validated = $this->formValidate();
 
-        [$serverData, $backupData] = $this->extractBackupData($validated);
-
+        $serverData = $this->extractServerData($validated);
         $serverData['ssh_config_id'] = $this->createOrUpdateSshConfig();
-        DatabaseServer::normalizeSelectionMode($serverData);
         DatabaseServer::buildExtraConfig($serverData);
 
-        $server = DatabaseServer::create($serverData);
-        $this->syncBackupConfiguration($server, $backupData);
+        DB::transaction(function () use ($serverData): void {
+            $server = DatabaseServer::create($serverData);
+            $this->syncBackupConfigurations($server);
+            $this->syncNotificationChannels($server);
+        });
 
         return true;
     }
@@ -875,7 +902,7 @@ class DatabaseServerForm extends Form
 
         $validated = $this->formValidate();
 
-        [$serverData, $backupData] = $this->extractBackupData($validated);
+        $serverData = $this->extractServerData($validated);
 
         // Only update password if a new one is provided
         if (isset($serverData['password']) && $serverData['password'] === '') {
@@ -883,13 +910,32 @@ class DatabaseServerForm extends Form
         }
 
         $serverData['ssh_config_id'] = $this->createOrUpdateSshConfig();
-        DatabaseServer::normalizeSelectionMode($serverData);
         DatabaseServer::buildExtraConfig($serverData, $this->server->extra_config, $this->server->database_type->value);
 
-        $this->server->update($serverData);
-        $this->syncBackupConfiguration($this->server, $backupData);
+        DB::transaction(function () use ($serverData): void {
+            $this->server->update($serverData);
+            $this->syncBackupConfigurations($this->server);
+            $this->syncNotificationChannels($this->server);
+        });
 
         return true;
+    }
+
+    /**
+     * Strip backup/notification-only fields from the validated payload so the
+     * remaining array can be passed straight to Eloquent's mass assignment.
+     *
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function extractServerData(array $validated): array
+    {
+        unset(
+            $validated['backups'],
+            $validated['notification_channel_ids'],
+        );
+
+        return $validated;
     }
 
     /**
@@ -954,68 +1000,39 @@ class DatabaseServerForm extends Form
         return DatabaseServerSshConfig::create($sshData)->id;
     }
 
-    /**
-     * Extract backup-related fields from validated data.
-     *
-     * @param  array<string, mixed>  $validated
-     * @return array{0: array<string, mixed>, 1: array<string, mixed>}
-     */
-    private function extractBackupData(array $validated): array
+    private function syncBackupConfigurations(DatabaseServer $server): void
     {
-        $retentionPolicy = $validated['retention_policy'] ?? Backup::RETENTION_DAYS;
+        app(SyncBackupConfigurationsAction::class)->execute($server, $this->backups);
+    }
 
-        $backupData = [
-            'volume_id' => $validated['volume_id'] ?? '',
-            'path' => ! empty($validated['path']) ? $validated['path'] : null,
-            'backup_schedule_id' => $validated['backup_schedule_id'] ?? '',
-            'retention_policy' => $retentionPolicy,
-        ];
-
-        // Set retention fields based on policy
-        if ($retentionPolicy === Backup::RETENTION_DAYS) {
-            $backupData['retention_days'] = $validated['retention_days'] ?? null;
-            $backupData['gfs_keep_daily'] = null;
-            $backupData['gfs_keep_weekly'] = null;
-            $backupData['gfs_keep_monthly'] = null;
-        } elseif ($retentionPolicy === Backup::RETENTION_GFS) {
-            $backupData['retention_days'] = null;
-            // Normalize 0 to null for consistency (0 means "disabled" same as null)
-            $backupData['gfs_keep_daily'] = ! empty($validated['gfs_keep_daily']) ? $validated['gfs_keep_daily'] : null;
-            $backupData['gfs_keep_weekly'] = ! empty($validated['gfs_keep_weekly']) ? $validated['gfs_keep_weekly'] : null;
-            $backupData['gfs_keep_monthly'] = ! empty($validated['gfs_keep_monthly']) ? $validated['gfs_keep_monthly'] : null;
+    private function syncNotificationChannels(DatabaseServer $server): void
+    {
+        if ($this->notification_channel_selection === 'selected') {
+            $server->notificationChannels()->sync($this->notification_channel_ids);
         } else {
-            // RETENTION_FOREVER - no retention fields needed
-            $backupData['retention_days'] = null;
-            $backupData['gfs_keep_daily'] = null;
-            $backupData['gfs_keep_weekly'] = null;
-            $backupData['gfs_keep_monthly'] = null;
+            $server->notificationChannels()->detach();
         }
-
-        unset(
-            $validated['volume_id'],
-            $validated['path'],
-            $validated['backup_schedule_id'],
-            $validated['retention_days'],
-            $validated['retention_policy'],
-            $validated['gfs_keep_daily'],
-            $validated['gfs_keep_weekly'],
-            $validated['gfs_keep_monthly']
-        );
-
-        return [$validated, $backupData];
     }
 
     /**
-     * @param  array<string, mixed>  $backupData
+     * @return \Illuminate\Database\Eloquent\Collection<int, NotificationChannel>
      */
-    private function syncBackupConfiguration(DatabaseServer $server, array $backupData): void
+    public function getNotificationChannels(): \Illuminate\Database\Eloquent\Collection
     {
-        if ($server->backups_enabled) {
-            $server->backup()->updateOrCreate(
-                ['database_server_id' => $server->id],
-                $backupData
+        return NotificationChannel::orderBy('name')->get();
+    }
+
+    public function toggleNotificationChannel(string $channelId): void
+    {
+        if (in_array($channelId, $this->notification_channel_ids, true)) {
+            $this->notification_channel_ids = array_values(
+                array_filter($this->notification_channel_ids, fn (string $id): bool => $id !== $channelId)
             );
+
+            return;
         }
+
+        $this->notification_channel_ids[] = $channelId;
     }
 
     public function testConnection(): void
@@ -1029,11 +1046,14 @@ class DatabaseServerForm extends Form
         try {
             if ($this->isSqlite()) {
                 $this->normalizeDatabaseNames();
-                $rules = $this->getSqlitePathRules();
-                if ($this->ssh_enabled) {
-                    $rules = array_merge($rules, $this->getSshValidationRules());
+                if ($this->collectSqlitePaths() === []) {
+                    throw ValidationException::withMessages([
+                        'form.backups' => __('Add at least one SQLite database path before testing the connection.'),
+                    ]);
                 }
-                $this->validate($rules);
+                if ($this->ssh_enabled) {
+                    $this->validate($this->getSshValidationRules());
+                }
             } elseif ($this->hasOptionalCredentials()) {
                 $this->validate([
                     'host' => 'required|string|max:255',
@@ -1050,7 +1070,10 @@ class DatabaseServerForm extends Form
         } catch (ValidationException $e) {
             $this->testingConnection = false;
             $this->connectionTestSuccess = false;
-            $this->connectionTestMessage = 'Please fill in all required connection fields.';
+            /** @var string $message */
+            $message = collect($e->errors())->flatten()->first()
+                ?? __('Please fill in all required connection fields.');
+            $this->connectionTestMessage = $message;
 
             return;
         }
@@ -1077,7 +1100,7 @@ class DatabaseServerForm extends Form
             'port' => $this->port,
             'username' => $this->username,
             'password' => $password,
-            'database_names' => $this->isSqlite() ? $this->database_names : null,
+            'database_names' => $this->isSqlite() ? $this->collectSqlitePaths() : null,
             'extra_config' => $this->isMongodb() ? ['auth_source' => $this->auth_source] : null,
         ], $sshConfig);
 

@@ -5,18 +5,17 @@ namespace App\Livewire\DatabaseServer;
 use App\Livewire\Forms\DatabaseServerForm;
 use App\Models\BackupSchedule;
 use App\Models\DatabaseServer;
+use App\Traits\Toast;
 use Illuminate\Contracts\View\View;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Attributes\Title;
 use Livewire\Component;
-use Mary\Traits\Toast;
 
 #[Title('Create Database Server')]
 class Create extends Component
 {
-    use AuthorizesRequests;
-    use Toast;
+    use AuthorizesRequests, Toast;
 
     public DatabaseServerForm $form;
 
@@ -24,36 +23,48 @@ class Create extends Component
     {
         $this->authorize('viewForm', DatabaseServer::class);
 
-        $dailySchedule = BackupSchedule::where('name', 'Daily')->first();
-        if ($dailySchedule) {
-            $this->form->backup_schedule_id = $dailySchedule->id;
-        }
+        $dailyScheduleId = BackupSchedule::where('name', 'Daily')->value('id');
+        $this->form->addBackup($dailyScheduleId);
     }
 
     public function save(): void
     {
         if (Gate::denies('create', DatabaseServer::class)) {
-            session()->flash('demo_notice', __('Demo mode is enabled. Changes cannot be saved.'));
-            $this->redirect(route('database-servers.index'), navigate: true);
+            $this->warning(
+                title: __('Demo mode is enabled. Changes cannot be saved.'),
+                redirectTo: route('database-servers.index'),
+                flashAs: 'demo_notice',
+            );
 
             return;
         }
 
         if ($this->form->store()) {
-            session()->flash('status', 'Database server created successfully!');
-
-            $this->redirect(route('database-servers.index'), navigate: true);
+            $this->success(
+                title: __('Database server created successfully!'),
+                redirectTo: route('database-servers.index'),
+            );
         }
     }
 
-    public function addDatabasePath(): void
+    public function addBackup(?string $defaultScheduleId = null): void
     {
-        $this->form->addDatabasePath();
+        $this->form->addBackup($defaultScheduleId);
     }
 
-    public function removeDatabasePath(int $index): void
+    public function removeBackup(int $index): void
     {
-        $this->form->removeDatabasePath($index);
+        $this->form->removeBackup($index);
+    }
+
+    public function addDatabasePath(int $backupIndex): void
+    {
+        $this->form->addDatabasePath($backupIndex);
+    }
+
+    public function removeDatabasePath(int $backupIndex, int $pathIndex): void
+    {
+        $this->form->removeDatabasePath($backupIndex, $pathIndex);
     }
 
     public function testConnection(): void
@@ -68,12 +79,17 @@ class Create extends Component
 
     public function refreshVolumes(): void
     {
-        $this->success(__('Volume list refreshed.'), position: 'toast-bottom');
+        $this->success(__('Volume list refreshed.'));
     }
 
     public function refreshSchedules(): void
     {
-        $this->success(__('Schedule list refreshed.'), position: 'toast-bottom');
+        $this->success(__('Schedule list refreshed.'));
+    }
+
+    public function toggleNotificationChannel(string $channelId): void
+    {
+        $this->form->toggleNotificationChannel($channelId);
     }
 
     public function render(): View

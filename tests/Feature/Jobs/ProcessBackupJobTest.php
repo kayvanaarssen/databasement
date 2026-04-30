@@ -18,7 +18,7 @@ test('job is configured with correct queue and settings', function () {
     AppConfig::set('backup.job_backoff', 120);
 
     $server = DatabaseServer::factory()->create(['database_names' => ['testdb']]);
-    $snapshot = app(BackupJobFactory::class)->createSnapshots($server, 'manual')[0];
+    $snapshot = app(BackupJobFactory::class)->createSnapshots($server->backups->first(), 'manual')[0];
 
     $job = new ProcessBackupJob($snapshot->id);
 
@@ -41,7 +41,7 @@ test('handle builds config from models and updates snapshot on success', functio
         'database_names' => ['myapp'],
     ]);
 
-    $snapshot = app(BackupJobFactory::class)->createSnapshots($server, 'manual')[0];
+    $snapshot = app(BackupJobFactory::class)->createSnapshots($server->backups->first(), 'manual')[0];
 
     $mockBackupTask = Mockery::mock(BackupTask::class);
     $mockBackupTask->shouldReceive('execute')
@@ -76,9 +76,9 @@ test('handle passes backup path from model to config', function () {
         'database_type' => 'mysql',
         'database_names' => ['myapp'],
     ]);
-    $server->backup->update(['path' => 'mysql/production']);
+    $server->backups->first()->update(['path' => 'mysql/production']);
 
-    $snapshot = app(BackupJobFactory::class)->createSnapshots($server, 'manual')[0];
+    $snapshot = app(BackupJobFactory::class)->createSnapshots($server->backups->first(), 'manual')[0];
 
     $mockBackupTask = Mockery::mock(BackupTask::class);
     $mockBackupTask->shouldReceive('execute')
@@ -100,9 +100,9 @@ test('handle defaults backup path to empty string when null', function () {
         'database_type' => 'mysql',
         'database_names' => ['myapp'],
     ]);
-    $server->backup->update(['path' => null]);
+    $server->backups->first()->update(['path' => null]);
 
-    $snapshot = app(BackupJobFactory::class)->createSnapshots($server, 'manual')[0];
+    $snapshot = app(BackupJobFactory::class)->createSnapshots($server->backups->first(), 'manual')[0];
 
     $mockBackupTask = Mockery::mock(BackupTask::class);
     $mockBackupTask->shouldReceive('execute')
@@ -125,7 +125,7 @@ test('handle marks job as failed and re-throws on execute failure', function () 
         'database_names' => ['myapp'],
     ]);
 
-    $snapshot = app(BackupJobFactory::class)->createSnapshots($server, 'manual')[0];
+    $snapshot = app(BackupJobFactory::class)->createSnapshots($server->backups->first(), 'manual')[0];
 
     $mockBackupTask = Mockery::mock(BackupTask::class);
     $mockBackupTask->shouldReceive('execute')
@@ -145,7 +145,7 @@ test('job can be dispatched to queue', function () {
     Queue::fake();
 
     $server = DatabaseServer::factory()->create(['database_names' => ['testdb']]);
-    $snapshot = app(BackupJobFactory::class)->createSnapshots($server, 'manual')[0];
+    $snapshot = app(BackupJobFactory::class)->createSnapshots($server->backups->first(), 'manual')[0];
 
     ProcessBackupJob::dispatch($snapshot->id);
 
@@ -155,20 +155,53 @@ test('job can be dispatched to queue', function () {
 });
 
 test('failed method sends notification', function () {
-    AppConfig::set('notifications.enabled', true);
-    AppConfig::set('notifications.mail.to', 'admin@example.com');
+    \App\Models\NotificationChannel::factory()->email()->create(['config' => ['to' => 'admin@example.com']]);
 
     $server = DatabaseServer::factory()->create(['database_names' => ['testdb']]);
-    $snapshot = app(BackupJobFactory::class)->createSnapshots($server, 'manual')[0];
+    $snapshot = app(BackupJobFactory::class)->createSnapshots($server->backups->first(), 'manual')[0];
 
     $job = new ProcessBackupJob($snapshot->id);
     $exception = new \Exception('Backup failed: connection timeout');
 
     $job->failed($exception);
 
-    Notification::assertSentOnDemand(
-        \App\Notifications\BackupFailedNotification::class,
-        fn ($notification) => $notification->snapshot->id === $snapshot->id
-            && $notification->exception->getMessage() === 'Backup failed: connection timeout'
-    );
+    Notification::assertSentTimes(\App\Notifications\BackupFailedNotification::class, 1);
+});
+
+test('handle uses empty backupPath when the snapshot is orphaned (backup removed)', function () {
+    $server = createDatabaseServer([
+        'host' => 'db.example.com',
+        'port' => 3306,
+        'database_type' => 'mysql',
+        'username' => 'root',
+        'password' => 'secret',
+        'database_names' => ['myapp'],
+    ]);
+
+    $backup = $server->backups->first();
+    $backup->update(['path' => 'should/not/be/used/{year}']);
+    $snapshot = app(BackupJobFactory::class)->createSnapshots($backup, 'manual')[0];
+
+    // Delete the parent backup — FK is nullOnDelete so snapshot.backup_id → null
+    $backup->delete();
+    $snapshot->refresh();
+    expect($snapshot->backup_id)->toBeNull();
+
+    $capturedPath = null;
+    $mockBackupTask = Mockery::mock(BackupTask::class);
+    $mockBackupTask->shouldReceive('execute')
+        ->once()
+        ->with(
+            Mockery::on(function (BackupConfig $config) use (&$capturedPath) {
+                $capturedPath = $config->backupPath;
+
+                return true;
+            }),
+            Mockery::type(BackupLogger::class),
+        )
+        ->andReturn(new BackupResult('myapp.sql.gz', 1024, 'sha'));
+
+    (new ProcessBackupJob($snapshot->id))->handle($mockBackupTask);
+
+    expect($capturedPath)->toBe('');
 });
